@@ -28,17 +28,25 @@ Created by **Wesley Faulkner**
 
 ---
 
-## 🧩 Install
+## 🧩 One-liner Install
 
-Run on any **Proxmox VE node** as **root**:
+Run this directly on any **Proxmox VE node** as **root**:
 
 ```bash
-bash openclaw-vm.sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/wesley83/proxmox-openclaw-vm/main/openclaw-vm.sh)"
 ```
 
-For a first run, enable tracing so the log captures everything:
+Pass flags after `--`:
 
 ```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/wesley83/proxmox-openclaw-vm/main/openclaw-vm.sh)" -- --memory 16384 --cores 8
+```
+
+Or clone and run locally — recommended for a first run, since `--debug` output goes to the log:
+
+```bash
+git clone https://github.com/wesley83/proxmox-openclaw-vm.git
+cd proxmox-openclaw-vm
 bash openclaw-vm.sh --debug
 ```
 
