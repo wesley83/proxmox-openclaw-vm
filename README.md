@@ -117,8 +117,19 @@ bash openclaw-vm.sh --memory 16384 --cores 8 --disk 80G --node 24 --user assista
 | Autostart | `--onboot 1` — this is an always-on assistant |
 | Guest Agent | Installed and started (used for status polling and IP detection) |
 | Node.js | NodeSource, version-verified against OpenClaw's minimums |
+| Build toolchain | `build-essential python3 cmake` — matches what OpenClaw's own `install.sh` installs on Debian/Ubuntu |
 | OpenClaw | `npm install -g openclaw@latest` |
 | Gateway port | `18789` (not yet listening — set during onboarding) |
+
+### Why `cmake` is pre-installed
+
+OpenClaw's main native dependencies (`@lydell/node-pty`, `sqlite-vec`) ship per-platform **prebuilt** binaries, so a normal install compiles nothing. But when a prebuild is missing for the running Node ABI or architecture, npm falls back to building from source, which needs `cmake`.
+
+Upstream's `install.sh` handles this two ways: it installs `build-essential python3 make g++ cmake` unconditionally on Linux, *and* it greps failed npm logs for `cmake: command not found` / `Failed to build llama.cpp` to install the toolchain and retry. This script calls `npm` directly rather than going through `install.sh`, so it gets neither remedy — pre-installing the toolchain is what keeps that fallback from becoming an unrecoverable provisioning failure.
+
+### Browser automation is *not* included
+
+Nothing here downloads a browser. `openclaw` depends on `playwright-core`, which does **not** fetch Chromium at install time, and upstream's `install.sh` contains no browser handling at all. If you enable browser automation later, budget for installing a browser and its system libraries yourself — the default `40G` disk and `8192` MB RAM leave headroom for it.
 
 ---
 

@@ -67,9 +67,13 @@ printf "${CYAN}     ${REPO_URL}${RESET}\n\n"
 ############################################
 # Defaults
 ############################################
-# Sized for OpenClaw with browser automation enabled (bundled Chromium is the
-# dominant cost). These are our own sizing choices, not a published vendor spec
-# — trim with --memory/--cores/--disk for a text-only assistant.
+# Our own sizing choices, not a published vendor spec. Headroom is for the
+# npm global install plus native-module builds, and for later browser
+# automation if you add it. NOTE: nothing here downloads a browser —
+# openclaw depends on playwright-core, which does NOT fetch Chromium at
+# install time, and upstream's install.sh has no browser handling at all.
+# Enabling browser automation is a separate step that needs its own
+# browser + system libraries. Trim with --memory/--cores/--disk.
 MEMORY_MB=8192
 CORES=4
 DISK_SIZE="40G"
@@ -659,6 +663,22 @@ chpasswd:
 
 package_update: true
 
+# Build toolchain mirrors what OpenClaw's own install.sh installs on
+# Debian/Ubuntu (install_build_tools_linux):
+#   build-essential python3 make g++ cmake
+# make/g++/gcc come from build-essential; python3 is already in the cloud
+# image (cloud-init needs it) but is listed explicitly so node-gyp's
+# requirement is documented rather than assumed.
+#
+# cmake is the one that is NOT obvious. OpenClaw's main native deps
+# (@lydell/node-pty, sqlite-vec) ship per-platform PREBUILT binaries, so the
+# happy path compiles nothing — but when a prebuild is missing for the
+# running Node ABI/arch, npm falls back to building from source and needs
+# cmake. Upstream installs it unconditionally AND greps npm logs for
+# "cmake: command not found" / "Failed to build llama.cpp" to install it and
+# retry. This script calls npm directly, so it gets neither remedy: without
+# cmake pre-installed, that fallback is an unrecoverable provisioning
+# failure. ~30 MB to delete an entire failure class.
 packages:
   - curl
   - ca-certificates
@@ -667,6 +687,8 @@ packages:
   - unzip
   - openssl
   - build-essential
+  - python3
+  - cmake
   - qemu-guest-agent
 EOF
 
