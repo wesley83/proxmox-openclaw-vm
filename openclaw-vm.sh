@@ -782,14 +782,35 @@ write_files:
       # Proxmox host log.
       USER_HOME="$(getent passwd "$VM_USER" | cut -d: -f6)"
       [ -n "$USER_HOME" ] || fail "could not resolve home directory for ${VM_USER}"
-      install -d -m 700 -o "$VM_USER" -g "$VM_USER" "$USER_HOME/.openclaw"
+      # Resolve the primary group instead of assuming it matches the username.
+      # cloud-init's users: module does create a matching group by default, but
+      # no_user_group or a pre-existing account breaks that assumption and
+      # 'install -g' would abort provisioning.
+      USER_GROUP="$(id -gn "$VM_USER")"
+      [ -n "$USER_GROUP" ] || fail "could not resolve primary group for ${VM_USER}"
+
+      install -d -m 700 -o "$VM_USER" -g "$USER_GROUP" "$USER_HOME/.openclaw"
       TOKEN_FILE="$USER_HOME/.openclaw/gateway-token"
       if [ ! -s "$TOKEN_FILE" ]; then
+        # Create with final ownership/mode FIRST, then write. A bare redirect
+        # would create the file 0644 root:root under root's umask and only fix
+        # it afterwards; '>' into an existing file preserves owner and mode.
+        install -m 600 -o "$VM_USER" -g "$USER_GROUP" /dev/null "$TOKEN_FILE" \
+          || fail "could not create gateway token file"
         openssl rand -hex 32 > "$TOKEN_FILE" || fail "could not generate gateway token"
       fi
-      chown "$VM_USER:$VM_USER" "$TOKEN_FILE"
+      chown "$VM_USER:$USER_GROUP" "$TOKEN_FILE"
       chmod 600 "$TOKEN_FILE"
-      echo "[*] Gateway token written to ${TOKEN_FILE}"
+
+      # Assert the result rather than trusting it: a silent chown failure here
+      # would leave the operator unable to read their own gateway token.
+      TOKEN_STAT="$(stat -c '%U %a' "$TOKEN_FILE")"
+      [ "$TOKEN_STAT" = "$VM_USER 600" ] \
+        || fail "gateway token has wrong ownership/mode (got '${TOKEN_STAT}', want '${VM_USER} 600')"
+      DIR_STAT="$(stat -c '%U %a' "$USER_HOME/.openclaw")"
+      [ "$DIR_STAT" = "$VM_USER 700" ] \
+        || fail "~/.openclaw has wrong ownership/mode (got '${DIR_STAT}', want '${VM_USER} 700')"
+      echo "[*] Gateway token written to ${TOKEN_FILE} (${VM_USER}, 600)"
 
       printf 'node=%s openclaw=%s\n' "$NODE_VER" "$OPENCLAW_VER" > /var/log/openclaw-install.ok
       echo "[*] Provisioning complete."

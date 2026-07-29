@@ -230,6 +230,23 @@ qm guest exec <VMID> -- cat /var/log/openclaw-install.ok
 ### ❗ "Password change required but no TTY available."
 Expected. Cloud-init expires the initial password, and until you change it interactively, PAM refuses **all** non-interactive SSH commands for that user — even with valid key auth. Log in interactively once (`ssh <user>@<vm-ip>`) and set a new password. This is exactly why the script polls via the guest agent instead of SSH.
 
+### ❗ "sudo: PAM error: Authentication token manipulation error"
+The same root cause, and it clears the same way. While the initial password is expired, `sudo` fails for that user **even though the account has `NOPASSWD: ALL`** — `NOPASSWD` skips the auth stack, but PAM's *account* stack still rejects an expired password. Verified on Ubuntu 26.04: `sudo` fails before the password change and succeeds immediately after.
+
+Nothing in provisioning is affected (it all runs as root), and normal OpenClaw use needs no `sudo` at all — but a command like `ssh <user>@<vm-ip> 'sudo ...'` will fail confusingly until you have logged in once interactively and set a new password.
+
+### ❗ Permissions: what needs to be writable
+Everything OpenClaw writes at runtime lives under `~/.openclaw/` (`state`, `logs`, `plugins`, `openclaw.json`), which the script creates as `0700` owned by the VM user. The npm global install under `/usr/lib/node_modules` is root-owned and stays read-only to the user — that is correct and expected, because nothing writes there at runtime. **Installing OpenClaw plugins does not require `sudo`.**
+
+If the gateway token is ever unreadable, check ownership:
+
+```bash
+stat -c '%U %G %a' ~/.openclaw ~/.openclaw/gateway-token
+# expect: <user> <group> 700   and   <user> <group> 600
+```
+
+The provisioning script asserts both of these and fails loudly rather than leaving you with a token you cannot read.
+
 ### ❗ "bun/openclaw: command not found" — or a failed install
 ```bash
 qm guest exec <VMID> -- cat /var/log/openclaw-install.fail
