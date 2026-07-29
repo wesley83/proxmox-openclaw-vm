@@ -190,7 +190,17 @@ This one command runs an interactive wizard with several prompts. Expect, roughl
 
 ![OpenClaw's first-chat session — a local embedded TUI chat where the newly onboarded agent says "Wake up, my friend!" and asks to be named, with a status line showing the model provider and token usage](img/onboarding-first-chat.png)
 
-This step is cosmetic, not structural — per OpenClaw's docs, your provider, channel, and web-search choices are already saved by this point and "workspace and Gateway settings remain untouched" by it. Chat with it to name your agent if you like, or exit with **Ctrl+C** and move on; either way, onboarding is done.
+This step is cosmetic, not structural — per OpenClaw's docs, your provider, channel, and web-search choices are already saved by this point and "workspace and Gateway settings remain untouched" by it. Two ways to get past it, both fine:
+
+- **Option A — give it a quick answer and move on.** Type something in the input box and press Enter; it doesn't need to be elaborate:
+
+  > Surprise me — pick a name, creature, and emoji you like. Keep it short.
+
+  It may reply once or twice more. Once you're satisfied, continue to step 3.
+
+- **Option B — skip it entirely.** Press **Ctrl+C** (or Ctrl+D) to exit straight back to the shell. This is a browser-embedded console (noVNC/xterm.js), so the keystroke should forward normally; if it doesn't respond, click into the terminal pane first to make sure it has focus.
+
+Either way, you end up back at a shell prompt, ready for step 3.
 
 > **About the token:** the script pre-generates `~/.openclaw/gateway-token`, but **nothing reads that file automatically** — OpenClaw reads auth from `gateway.auth` in `~/.openclaw/openclaw.json`, env vars, CLI flags, or an explicitly configured SecretRef. Passing `--gateway-token` is what links them. If your OpenClaw version lacks that flag, onboarding mints its own token instead — either way the **authoritative** token afterwards is `gateway.auth.token` in `openclaw.json`.
 
@@ -198,7 +208,7 @@ A gateway token is not optional for a LAN bind: **non-loopback binds refuse to s
 
 ### 3. Start the gateway
 
-Run this after the onboarding wizard above has returned control of the terminal (exit the first-chat session first if you're still in it):
+Everything up to this point has only *installed and configured* OpenClaw — nothing is actually listening yet. The Control UI and gateway API don't exist as a running process until this step. Run it after the onboarding wizard above has returned control of the terminal (exit the first-chat session first if you're still in it):
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
@@ -206,7 +216,13 @@ systemctl --user enable --now openclaw-gateway.service
 openclaw gateway status
 ```
 
-`XDG_RUNTIME_DIR` must be exported before any `systemctl --user` call on a headless box or it can't find the session bus. Lingering is already enabled by the script, so the gateway survives logout and starts at boot.
+What each line does, and why it matters:
+
+- **`export XDG_RUNTIME_DIR=/run/user/$(id -u)`** — `systemctl --user` needs to know where your personal systemd instance and its D-Bus session socket live, normally `/run/user/<your-numeric-uid>`. A full desktop login sets this automatically; an SSH or console session — especially right after first boot — often doesn't. `id -u` looks up your UID (for the `openclaw` user) so this works regardless of what number it actually is. Skip it and the next line typically fails with something like `Failed to connect to bus: No such file or directory`.
+
+- **`systemctl --user enable --now openclaw-gateway.service`** — `--install-daemon` (back in step 2) only created the *unit file*; this is what actually runs it. `enable` registers it to start automatically on every future boot; `--now` also starts it immediately, in this session, without waiting for a reboot. Combined with the systemd lingering the provisioning script already turned on for this user, this is what makes OpenClaw an always-on service — running now, and still running after you log out, reboot the VM, or it crashes and gets restarted — rather than something tied to your SSH session staying open.
+
+- **`openclaw gateway status`** — a read-only check: confirms the systemd unit is actually active, and does a connectivity/auth probe against the gateway's WebSocket port to verify your token is recognized. This is what tells you the previous line actually worked, before you go looking for the Control UI in a browser and wonder why it won't load.
 
 ### 4. Use it
 
