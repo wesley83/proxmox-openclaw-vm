@@ -24,7 +24,7 @@ Created by **Wesley Faulkner**
 
 ## ⚠️ Status
 
-**Not yet run against a real Proxmox node.** The guest-side provisioning has been executed for real: the embedded provisioning script ran green end-to-end in an isolated Ubuntu 26.04 rootfs (Node v26.5.1 from NodeSource, `npm install -g openclaw@latest` → 309 packages, `openclaw --version` and `openclaw doctor` working, token written with correct ownership). The host side has been exercised only against a mock PVE (stubbed `qm`/`pvesm`/`pvesh`) covering the happy path and three failure paths with correct exit codes — plus ShellCheck, schema validation of the generated cloud-init YAML against real cloud-init 26.1, and a full argument battery. The first live run on a Proxmox node is still the real test for the `qm`/QGA plumbing. See [Known Limitations](#-known-limitations).
+**Verified on real Proxmox VE hardware (PVE 7).** A full run against a `local-lvm` + directory-snippet-storage node completed end to end: disk import/resize on thin-LVM, cloud-init, Node v26.5.1, `openclaw 2026.7.1-2` installed, gateway token generated, provisioning confirmed via QEMU Guest Agent — exit 0. Before that, the guest-side provisioning also ran green in an isolated Ubuntu 26.04 rootfs, and the host side was exercised against a mock PVE covering the happy path and three failure paths with correct exit codes, plus ShellCheck and cloud-init schema validation. Onboarding (`openclaw onboard`) and the gateway daemon itself are still unexercised past this point. See [Known Limitations](#-known-limitations).
 
 ---
 
@@ -67,7 +67,7 @@ The script will:
 |------------|-------------|
 | Proxmox VE 7/8/9 | Runs directly on a node (not inside a VM) |
 | Snippets storage | A storage with **Snippets** content enabled *(once only — see below)* |
-| SSH key | `/root/.ssh/id_ed25519.pub` or `id_rsa.pub` on the node (or pass `--ssh-key`) |
+| SSH key | `/root/.ssh/id_ed25519.pub` or `id_rsa.pub` **on the Proxmox node** (or pass `--ssh-key`). This is the node's own key, not your desktop's — see the note below |
 | `qm`, `pvesh`, `pvesm`, `curl`, `qemu-img`, `ip`, `awk` | Pre-installed on Proxmox; verified by the script |
 | `python3` | Optional but recommended — used for JSON parsing, with fallbacks throughout |
 | Network access | `cloud-images.ubuntu.com` and `api.launchpad.net` (host); `archive.ubuntu.com`/`security.ubuntu.com` or your apt mirror, `deb.nodesource.com`, and the npm registry (guest). On an egress-filtered network, blocking the apt mirrors fails provisioning *and* blanks QGA status polling, since `qemu-guest-agent` is one of the apt packages |
@@ -162,6 +162,8 @@ The script installs OpenClaw but does **not** onboard it. Finish over SSH:
 ssh <user>@<vm-ip>
 ```
 
+> **Run this from the Proxmox node, not your desktop** — the embedded key is `/root/.ssh/id_ed25519.pub` (or `id_rsa.pub`) **on the node**, so only the node's own key is authorized. Connecting from elsewhere fails with `Permission denied (publickey)` before any password prompt even appears. To connect directly from your own machine going forward, add its public key to `~/.ssh/authorized_keys` on the VM (or re-run with `--ssh-key` pointing at a file containing both keys, one per line — multiple keys are supported), once you're in via the node.
+
 > **First login forces a password change.** Have the console password from the summary ready — PAM asks for it as the "current" password even with SSH key auth.
 
 ### 2. Onboard
@@ -235,6 +237,11 @@ The auto-selected storage can't hold VM disks. Pick one explicitly:
 ```bash
 bash openclaw-vm.sh --storage local-zfs
 ```
+
+### ❗ "Permission denied (publickey)" when connecting to the VM
+You're almost certainly connecting from the wrong machine. The embedded SSH key is auto-detected from **the Proxmox node** (`/root/.ssh/id_ed25519.pub` or `id_rsa.pub`), not from wherever you're typing the `ssh` command. This fails at the handshake, before any password prompt — it's unrelated to the password-expiry issues below.
+
+Fix: SSH in **from the Proxmox node itself** first (its key is the one that was embedded), then append your own workstation's public key to `~/.ssh/authorized_keys` on the VM so you can connect directly next time. Or pass `--ssh-key` at creation time pointing at a file with both keys (one per line).
 
 ### ❗ "--disk 512M is not larger than the cloud image's virtual size"
 `qm resize` treats a bare size as absolute and cannot shrink. Use something larger than ~3.5 GiB — `40G` is the default for a reason.
