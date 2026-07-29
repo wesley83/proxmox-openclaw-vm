@@ -77,6 +77,17 @@ printf "${CYAN}     ${REPO_URL}${RESET}\n\n"
 MEMORY_MB=8192
 CORES=4
 DISK_SIZE="40G"
+SWAP_SIZE="2G"            # Ubuntu cloud images ship with NO swap; "0" disables
+
+# Floors are hard failures; the "comfortable" values only warn. Sized from
+# measured footprint: base rootfs ~2.2G, apt adds ~700M (build-essential's
+# toolchain ~400M, cmake+cmake-data ~75M, git 25M), NodeSource nodejs ~120M,
+# openclaw unpacked 83.4 MiB across 8550 files plus 56 dependency trees, and
+# npm/apt caches on top — roughly 5G before the assistant stores anything.
+MIN_MEMORY_MB=2048
+REC_MEMORY_MB=4096
+MIN_DISK_G=8
+REC_DISK_G=20
 UBUNTU_CODENAME="noble"   # Fallback if LTS auto-detection fails
 VM_USER="openclaw"
 NODE_MAJOR=26             # OpenClaw docs recommend Node 26
@@ -131,8 +142,11 @@ Creates an Ubuntu VM on Proxmox VE with Node.js and OpenClaw installed.
 Onboarding is left to you — the summary prints the exact commands.
 
 Options:
-  -m, --memory <MB>       RAM in MB (default ${MEMORY_MB}, must be >= 1)
+  -m, --memory <MB>       RAM in MB (default ${MEMORY_MB}; minimum ${MIN_MEMORY_MB},
+                          ${REC_MEMORY_MB}+ recommended)
   -c, --cores <N>         CPU cores (default ${CORES}, must be >= 1)
+  -s, --swap <SIZE>       Swap file size with suffix, or 0 to disable
+                          (default ${SWAP_SIZE}). Cloud images have no swap.
   -d, --disk <SIZE>       Disk size with suffix (e.g. 40G, 64G; default ${DISK_SIZE}).
                           Must exceed the cloud image's virtual size (~3.5G):
                           qm resize cannot shrink a disk
@@ -160,12 +174,24 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -m|--memory)
       [[ "${2:-}" =~ ^[0-9]+$ ]] || { ERROR "--memory must be a positive integer (MB)"; exit 1; }
-      (( $2 >= 1 )) || { ERROR "--memory must be >= 1 (got: $2)"; exit 1; }
+      # A 1 MB VM passed the old '>= 1' check and then failed to boot after the
+      # image download and VM creation. Fail here instead.
+      (( $2 >= MIN_MEMORY_MB )) || {
+        ERROR "--memory ${2} MB is below the ${MIN_MEMORY_MB} MB minimum."
+        ERROR "Node plus the npm install of openclaw (8550 files) needs real headroom."
+        exit 1
+      }
       MEMORY_MB="$2"; shift 2;;
     -c|--cores)
       [[ "${2:-}" =~ ^[0-9]+$ ]] || { ERROR "--cores must be a positive integer"; exit 1; }
       (( $2 >= 1 )) || { ERROR "--cores must be >= 1 (got: $2)"; exit 1; }
       CORES="$2"; shift 2;;
+    -s|--swap)
+      [[ "${2:-}" =~ ^([0-9]+[MGK]|0)$ ]] || {
+        ERROR "--swap must be a size with suffix (e.g. 2G, 512M) or 0 to disable"
+        exit 1
+      }
+      SWAP_SIZE="$2"; shift 2;;
     -d|--disk)
       [[ "${2:-}" =~ ^[0-9]+[MGK]$ ]] || { ERROR "--disk must have a suffix (e.g. 40G) — bare numbers default to MB in qm resize"; exit 1; }
       size_num="${2%[MGK]}"
@@ -217,6 +243,35 @@ fi
 [[ "$DEBUG" -eq 1 ]] && set -x
 
 ############################################
+# Resource sanity (advisory)
+############################################
+# Hard floors already rejected the impossible; these only warn, because
+# overcommit and small VMs are legitimate choices on a homelab node.
+(( MEMORY_MB < REC_MEMORY_MB )) && \
+  WARN "RAM ${MEMORY_MB} MB is below the recommended ${REC_MEMORY_MB} MB — the npm install may be slow or get OOM-killed."
+
+_disk_num="${DISK_SIZE%[MGK]}"
+case "$DISK_SIZE" in
+  *G) _disk_g="$_disk_num";;
+  *M) _disk_g=$(( _disk_num / 1024 ));;
+  *K) _disk_g=$(( _disk_num / 1048576 ));;
+  *)  _disk_g=0;;
+esac
+if (( _disk_g < MIN_DISK_G )); then
+  ERROR "--disk ${DISK_SIZE} is below the ${MIN_DISK_G}G minimum."
+  ERROR "Base image ~2.2G + build toolchain ~700M + Node ~120M + OpenClaw and"
+  ERROR "its caches land near 5G before the assistant stores anything."
+  exit 1
+fi
+(( _disk_g < REC_DISK_G )) && \
+  WARN "Disk ${DISK_SIZE} is below the recommended ${REC_DISK_G}G — expect little room for logs, state, and workspace growth."
+
+if HOST_THREADS="$(nproc 2>/dev/null)" && [[ "$HOST_THREADS" =~ ^[0-9]+$ ]]; then
+  (( CORES > HOST_THREADS )) && \
+    WARN "--cores ${CORES} exceeds this node's ${HOST_THREADS} CPU threads (overcommit; allowed but may hurt other guests)."
+fi
+
+############################################
 # Environment validation
 ############################################
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -253,7 +308,7 @@ INFO "VM Name: $VM_NAME"
 INFO "Ubuntu codename: $UBUNTU_CODENAME"
 INFO "Node.js major: $NODE_MAJOR"
 INFO "VM user: $VM_USER"
-INFO "Resources: ${MEMORY_MB} MB RAM, ${CORES} cores, disk ${DISK_SIZE}"
+INFO "Resources: ${MEMORY_MB} MB RAM, ${CORES} cores, disk ${DISK_SIZE}, swap ${SWAP_SIZE}"
 
 ############################################
 # Cleanup handler
@@ -507,6 +562,22 @@ OK "Loaded ${VALID_KEY_COUNT} SSH key(s) from ${SSH_KEY}"
 # || true suppresses SIGPIPE (141) from pipefail when head closes the pipe.
 RANDOM_PASSWORD="$(LC_ALL=C tr -dc 'A-HJ-Za-km-z0-9' </dev/urandom | head -c 8 || true)"
 
+# Ubuntu cloud images ship with NO swap at all. cloud-init's 'mounts' module
+# creates the swapfile during the cloud_init stage — verified to run before
+# package_update_upgrade_install and runcmd (cloud_final) — so swap is active
+# for the apt and npm install phases, which are the memory spikes.
+# A string size is passed through util.human2bytes(), so "2G" is valid.
+if [[ "$SWAP_SIZE" == "0" ]]; then
+  SWAP_YAML=""
+  INFO "Swap: disabled by --swap 0"
+else
+  SWAP_YAML="swap:
+  filename: /swapfile
+  size: ${SWAP_SIZE}
+"
+  INFO "Swap: ${SWAP_SIZE} swapfile at /swapfile"
+fi
+
 ############################################
 # Download Ubuntu cloud image
 ############################################
@@ -661,6 +732,7 @@ chpasswd:
       password: ${RANDOM_PASSWORD}
       type: text
 
+${SWAP_YAML}
 package_update: true
 
 # Build toolchain mirrors what OpenClaw's own install.sh installs on

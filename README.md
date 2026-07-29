@@ -85,9 +85,10 @@ This is the most common reason a first run fails immediately.
 
 | Flag | Meaning | Default |
 |------|---------|---------|
-| `-m`, `--memory <MB>` | VM RAM (positive integer, ≥ 1) | `8192` |
-| `-c`, `--cores <N>` | CPU cores (positive integer, ≥ 1) | `4` |
-| `-d`, `--disk <SIZE>` | Disk size with suffix (e.g. `40G`, `64G`). **Must exceed the cloud image's virtual size (~3.5 GiB)** — `qm resize` cannot shrink | `40G` |
+| `-m`, `--memory <MB>` | VM RAM. Minimum `2048`, warns below `4096` | `8192` |
+| `-c`, `--cores <N>` | CPU cores (≥ 1). Warns if it exceeds the node's CPU threads | `4` |
+| `-d`, `--disk <SIZE>` | Disk size with suffix. Minimum `8G`, warns below `20G`; must also exceed the image's ~3.5 GiB virtual size, since `qm resize` cannot shrink | `40G` |
+| `-s`, `--swap <SIZE>` | Swapfile size, or `0` to disable. Cloud images ship with **no swap** | `2G` |
 | `-u`, `--ubuntu <codename>` | Ubuntu codename (`resolute`, `noble`, `jammy`, …) | latest active LTS (auto-detected; falls back to `noble`) |
 | `-n`, `--node <major>` | Node.js major version | `26` (supported: `22 24 25 26`) |
 | `--user <name>` | VM username (lowercase, starts with a–z or `_`, ≤ 32 chars) | `openclaw` |
@@ -126,6 +127,27 @@ bash openclaw-vm.sh --memory 16384 --cores 8 --disk 80G --node 24 --user assista
 OpenClaw's main native dependencies (`@lydell/node-pty`, `sqlite-vec`) ship per-platform **prebuilt** binaries, so a normal install compiles nothing. But when a prebuild is missing for the running Node ABI or architecture, npm falls back to building from source, which needs `cmake`.
 
 Upstream's `install.sh` handles this two ways: it installs `build-essential python3 make g++ cmake` unconditionally on Linux, *and* it greps failed npm logs for `cmake: command not found` / `Failed to build llama.cpp` to install the toolchain and retry. This script calls `npm` directly rather than going through `install.sh`, so it gets neither remedy — pre-installing the toolchain is what keeps that fallback from becoming an unrecoverable provisioning failure.
+
+### Resource sizing
+
+Measured footprint, so you can size deliberately rather than guess:
+
+| Component | Disk |
+|---|---|
+| Ubuntu cloud image, booted | ~2.2 G |
+| `build-essential` toolchain | ~400 M |
+| `cmake` + `cmake-data` | ~75 M |
+| `git` | ~25 M |
+| Node.js (NodeSource) | ~120 M |
+| OpenClaw unpacked | 83.4 MiB across 8550 files, **plus 56 dependency trees** |
+| apt + npm caches | a few hundred MB |
+| **Realistic total before you store anything** | **~5 G** |
+
+Hence the `8G` hard floor and `20G` warning. The `40G` default leaves room for logs, state, conversation history, and a browser later.
+
+**Swap:** Ubuntu cloud images ship with **zero** swap, which makes a memory spike an instant OOM-kill rather than a slowdown. The script adds a `2G` swapfile via cloud-init's `mounts` module. Ordering was verified against the real module list: `growpart` → `resizefs` → `mounts` all run in the `cloud_init` stage, *before* `package_update_upgrade_install` and `runcmd` in `cloud_final` — so the disk is already grown and swap is already active during the apt and npm installs, which are the actual memory spikes. Disable with `--swap 0`.
+
+**Disk growth** is automatic: `growpart` and `resizefs` are image-level cloud-init modules, so they still run even though `--cicustom` replaces the user-data.
 
 ### Browser automation is *not* included
 
