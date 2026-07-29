@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.1.0
+# Version: v1.2.0
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.1.0"
+SCRIPT_VERSION="v1.2.0"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -176,7 +176,9 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -m|--memory)
-      [[ "${2:-}" =~ ^[0-9]+$ ]] || { ERROR "--memory must be a positive integer (MB)"; exit 1; }
+      # Leading zeros rejected everywhere: bash (( )) reads them as OCTAL, so
+      # '--memory 010000' would pass the floor as 4096 while qm allocates 10000.
+      [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { ERROR "--memory must be a positive integer (MB, no leading zeros)"; exit 1; }
       # A 1 MB VM passed the old '>= 1' check and then failed to boot after the
       # image download and VM creation. Fail here instead.
       (( $2 >= MIN_MEMORY_MB )) || {
@@ -186,19 +188,18 @@ while [[ $# -gt 0 ]]; do
       }
       MEMORY_MB="$2"; shift 2;;
     -c|--cores)
-      [[ "${2:-}" =~ ^[0-9]+$ ]] || { ERROR "--cores must be a positive integer"; exit 1; }
-      (( $2 >= 1 )) || { ERROR "--cores must be >= 1 (got: $2)"; exit 1; }
+      [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { ERROR "--cores must be a positive integer (no leading zeros)"; exit 1; }
       CORES="$2"; shift 2;;
     -s|--swap)
-      [[ "${2:-}" =~ ^([0-9]+[MGK]|0)$ ]] || {
-        ERROR "--swap must be a size with suffix (e.g. 2G, 512M) or 0 to disable"
+      # [1-9] start: '0G' would pass a laxer regex, skip the bare-'0' disable
+      # branch, and emit a swap block cloud-init silently ignores.
+      [[ "${2:-}" =~ ^([1-9][0-9]*[MGK]|0)$ ]] || {
+        ERROR "--swap must be a size with suffix (e.g. 2G, 512M) or exactly 0 to disable"
         exit 1
       }
       SWAP_SIZE="$2"; shift 2;;
     -d|--disk)
-      [[ "${2:-}" =~ ^[0-9]+[MGK]$ ]] || { ERROR "--disk must have a suffix (e.g. 40G) — bare numbers default to MB in qm resize"; exit 1; }
-      size_num="${2%[MGK]}"
-      (( size_num >= 1 )) || { ERROR "--disk must be >= 1 (got: $2)"; exit 1; }
+      [[ "${2:-}" =~ ^[1-9][0-9]*[MGK]$ ]] || { ERROR "--disk must be a size with suffix and no leading zeros (e.g. 40G) — bare numbers default to MB in qm resize"; exit 1; }
       DISK_SIZE="$2"; shift 2;;
     -u|--ubuntu)
       [[ -n "${2:-}" && "${2:-}" != -* ]] || { ERROR "--ubuntu requires a codename argument"; exit 1; }
@@ -300,7 +301,12 @@ fi
 VM_NAME="openclaw-${VM_ID}"
 LOG_FILE="/var/log/openclaw-vm-${VM_ID}.log"
 
-# Begin logging
+# Begin logging. The log carries the console password (summary line), so give
+# it the same 0600 treatment as the cloud-init snippet — tee would otherwise
+# create it 0644 under root's umask. touch+chmod rather than install: a re-run
+# appends to an existing log, and this also tightens logs from older versions.
+touch "$LOG_FILE"
+chmod 600 "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
 TEE_PID=$!
 
@@ -329,8 +335,15 @@ cleanup() {
       ERROR "Script failed with exit code $exit_code."
       WARN "Cleaning up VM ${VM_ID}..."
       qm stop "${VM_ID}" >/dev/null 2>&1 || true
-      qm destroy "${VM_ID}" --purge >/dev/null 2>&1 || true
-      OK "Destroyed VM ${VM_ID}."
+      # Report what actually happened: a locked config (e.g. killed mid-
+      # importdisk) makes destroy fail, and claiming success would leave an
+      # orphan VM with no cue to remove it.
+      if qm destroy "${VM_ID}" --purge >/dev/null 2>&1; then
+        OK "Destroyed VM ${VM_ID}."
+      else
+        WARN "Could not destroy VM ${VM_ID} (config locked?). Remove it manually:"
+        WARN "  qm stop ${VM_ID}; qm destroy ${VM_ID} --purge"
+      fi
       ERROR "See log file for details: ${LOG_FILE}"
     elif [[ $VM_CREATED -eq 1 ]]; then
       WARN "Exit code ${exit_code}: VM ${VM_ID} was KEPT for inspection (not destroyed)."
@@ -351,7 +364,15 @@ cleanup() {
   exec >/dev/null 2>&1
   wait "${TEE_PID:-}" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+# cleanup hangs off EXIT only. Signals must EXIT THROUGH it, not run it
+# directly: a signal trap that merely returns lets bash RESUME the script —
+# Ctrl-C during the 17-minute wait would destroy the VM, silence all output
+# (cleanup closes stdout and reaps tee), then keep polling the destroyed VM
+# and finally exit 2 claiming it was "kept for inspection". Reproduced; the
+# split-trap form terminates exactly once with the real exit code.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 ############################################
 # Detect VM disk storage
@@ -365,6 +386,15 @@ INFO "Detecting VM disk storage..."
 if [[ "$STORAGE_ID" != "auto" && -n "$STORAGE_ID" ]]; then
   STORAGE="$STORAGE_ID"
   INFO "Using user-selected storage: ${STORAGE}"
+  # storage.cfg is cluster-wide and static — a disabled, unmounted, or
+  # other-node storage still shows 'content images' there and would only fail
+  # at qm importdisk, AFTER the download and VM creation. Check live state now.
+  if ! pvesm status --content images | \
+       awk -v s="$STORAGE" 'NR>1 && $1==s && $3=="active"{found=1} END{exit !found}'; then
+    ERROR "Storage '${STORAGE}' is not an active images-capable storage on THIS node."
+    ERROR "Check 'pvesm status --content images', or omit --storage for auto-detection."
+    exit 1
+  fi
 elif pvesm status | awk 'NR>1{print $1,$3}' | grep '^local-lvm active' >/dev/null; then
   STORAGE="local-lvm"
 else
@@ -727,8 +757,12 @@ cat > "$USERDATA" <<EOF
 hostname: ${VM_NAME}
 manage_etc_hosts: true
 
+# name/password are quoted: the --user regex admits 'no', 'off', 'null' etc.,
+# which YAML 1.1 would otherwise load as booleans/None and silently attach the
+# account and keys to a non-string. The regex forbids '"' and '\', so plain
+# double-quoting is always safe.
 users:
-  - name: ${VM_USER}
+  - name: "${VM_USER}"
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     ssh_authorized_keys:
@@ -744,8 +778,8 @@ ${SSH_KEYS_YAML}
 chpasswd:
   expire: true
   users:
-    - name: ${VM_USER}
-      password: ${RANDOM_PASSWORD}
+    - name: "${VM_USER}"
+      password: "${RANDOM_PASSWORD}"
       type: text
 
 ${SWAP_YAML}
@@ -784,6 +818,16 @@ EOF
 cat >> "$USERDATA" <<'YAMLEOF'
 
 write_files:
+  # The dpkg-lock timeout must exist BEFORE cloud-init's own packages stage
+  # (cloud_config), not just before the provision script (cloud_final) — the
+  # 10-package install including qemu-guest-agent races unattended-upgrades
+  # too, and losing that race would blind the host's QGA status polling.
+  # write_files lands in the cloud_init stage, ahead of both.
+  - path: /etc/apt/apt.conf.d/90openclaw-lock-timeout
+    permissions: '0644'
+    owner: root:root
+    content: |
+      DPkg::Lock::Timeout "300";
   - path: /usr/local/sbin/openclaw-provision.sh
     permissions: '0755'
     owner: root:root
@@ -810,12 +854,9 @@ write_files:
       # then point the operator at a status file that does not exist.
       trap 'rc=$?; if [ "$rc" -ne 0 ] && [ ! -f /var/log/openclaw-install.fail ]; then echo "provision script exited ${rc} unexpectedly (see /var/log/openclaw-provision.log)" > /var/log/openclaw-install.fail; fi' EXIT
 
-      # First boot races unattended-upgrades for the dpkg lock. The timeout
-      # must live in apt.conf.d, not on our command lines: the NodeSource
-      # setup script runs its own 'apt update'/'apt install' internally, and
-      # a per-invocation -o option can never reach those.
-      printf 'DPkg::Lock::Timeout "300";\n' > /etc/apt/apt.conf.d/90openclaw-lock-timeout
-
+      # The dpkg-lock timeout lives in /etc/apt/apt.conf.d/90openclaw-lock-timeout,
+      # written by write_files in the cloud_init stage so it covers cloud-init's
+      # own packages phase AND the NodeSource setup script's internal apt calls.
       echo "[*] Waiting for any in-flight apt work to finish..."
       apt-get update -qq || true
 
@@ -823,6 +864,7 @@ write_files:
       curl -fsSL -o /tmp/nodesource_setup.sh "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" \
         || fail "could not download NodeSource setup script for Node ${NODE_MAJOR}.x"
       bash /tmp/nodesource_setup.sh || fail "NodeSource setup script failed"
+      rm -f /tmp/nodesource_setup.sh
       DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs \
         || fail "apt-get install nodejs failed"
 
@@ -952,13 +994,21 @@ except Exception:
     sys.exit(125)
 if not d.get("exited"):
     sys.exit(125)
-sys.stdout.write(d.get("out-data") or "")
+# Guest-controlled text lands on the host terminal and in the host log.
+# Strip control characters (keep \n and \t) so a compromised guest cannot
+# inject ANSI/terminal escape sequences through the status channel.
+out = d.get("out-data") or ""
+out = "".join(c for c in out if c in "\n\t" or (ord(c) >= 32 and ord(c) != 127))
+sys.stdout.write(out)
 code = d.get("exitcode", d.get("exit-code", 1))
 sys.exit(0 if code == 0 else 1)
 '
   else
     # No python3: detect success only; out-data is not extracted.
-    printf '%s' "$raw" | grep -Eq '"exit-?code"[[:space:]]*:[[:space:]]*0'
+    # Redirect form, not grep -q: -q exits at first match and can SIGPIPE the
+    # producer under pipefail (the catalogued local-lvm bug). Unreachable at
+    # today's payload sizes, but keep the file's own convention.
+    printf '%s' "$raw" | grep -E '"exit-?code"[[:space:]]*:[[:space:]]*0' >/dev/null
   fi
 }
 
@@ -1019,12 +1069,22 @@ INFO "Waiting for provisioning (Node + OpenClaw) — up to ~17 minutes..."
 for _ in {1..204}; do
   if [[ -z "$VM_IP" ]]; then
     VM_IP="$(detect_ip)"
+    # The QGA branch of detect_ip returns a guest-asserted string that gets
+    # embedded into the printed copy-paste ssh command — validate its shape.
+    if [[ -n "$VM_IP" && ! "$VM_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      WARN "Guest reported a malformed IP ($(printf '%q' "$VM_IP")); ignoring it."
+      VM_IP=""
+    fi
     [[ -n "$VM_IP" ]] && INFO "Detected VM IP: ${VM_IP}"
   fi
 
   if [[ -z "$INSTALL_STATUS" ]]; then
     if OUT="$(qga_exec cat /var/log/openclaw-install.ok)"; then
       INSTALL_OK=1
+      # From this moment the VM is worth keeping no matter how we exit —
+      # without this, a Ctrl-C during the summary would destroy a fully
+      # provisioned VM (KEEP_VM was previously only set just before exit 2).
+      KEEP_VM=1
       INSTALL_STATUS="${OUT:-ok}"
       OK "Provisioning complete: ${INSTALL_STATUS}"
     else
@@ -1033,6 +1093,10 @@ for _ in {1..204}; do
       # but no .ok file — check whether provisioning reported failure.
       if [[ $rc -ne 125 ]] && OUT="$(qga_exec cat /var/log/openclaw-install.fail)"; then
         INSTALL_STATUS="failed: ${OUT:-unknown}"
+        # Keep the failed VM NOW, not at exit: Ctrl-C during the ~60s IP
+        # grace window after this message is the natural operator reaction,
+        # and it must not destroy the evidence the summary promises.
+        KEEP_VM=1
         ERROR "OpenClaw provisioning FAILED: ${OUT:-see /var/log/openclaw-provision.log in the VM}"
       fi
     fi
@@ -1046,6 +1110,9 @@ for _ in {1..204}; do
 done
 
 if [[ -z "$INSTALL_STATUS" ]]; then
+  # Unconfirmed after the full window: the VM may still be provisioning —
+  # keep it from here on so a signal can't destroy it mid-diagnosis.
+  KEEP_VM=1
   WARN "Provisioning did not report a result within the wait window."
   WARN "It may still be running (first boot does a full apt update + install)."
   INFO "Diagnostics:"

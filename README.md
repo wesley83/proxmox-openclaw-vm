@@ -24,7 +24,7 @@ Created by **Wesley Faulkner**
 
 ## ⚠️ Status
 
-**Not yet run against real hardware.** The script has been verified extensively by static analysis and simulation — bash syntax, generated cloud-init YAML validated as YAML, the embedded provisioning script extracted and syntax-checked, the Node version gate tested against 12 boundary cases, the guest-agent JSON parser exercised against canned responses, the wait loop simulated through happy/fail/dead-VM scenarios, and the full argument battery — but the first live run on a Proxmox node is still the real test. See [Known Limitations](#-known-limitations).
+**Not yet run against a real Proxmox node.** The guest-side provisioning has been executed for real: the embedded provisioning script ran green end-to-end in an isolated Ubuntu 26.04 rootfs (Node v26.5.1 from NodeSource, `npm install -g openclaw@latest` → 309 packages, `openclaw --version` and `openclaw doctor` working, token written with correct ownership). The host side has been exercised only against a mock PVE (stubbed `qm`/`pvesm`/`pvesh`) covering the happy path and three failure paths with correct exit codes — plus ShellCheck, schema validation of the generated cloud-init YAML against real cloud-init 26.1, and a full argument battery. The first live run on a Proxmox node is still the real test for the `qm`/QGA plumbing. See [Known Limitations](#-known-limitations).
 
 ---
 
@@ -70,7 +70,7 @@ The script will:
 | SSH key | `/root/.ssh/id_ed25519.pub` or `id_rsa.pub` on the node (or pass `--ssh-key`) |
 | `qm`, `pvesh`, `pvesm`, `curl`, `qemu-img`, `ip`, `awk` | Pre-installed on Proxmox; verified by the script |
 | `python3` | Optional but recommended — used for JSON parsing, with fallbacks throughout |
-| Network access | `cloud-images.ubuntu.com`, `deb.nodesource.com`, npm registry, `api.launchpad.net` |
+| Network access | `cloud-images.ubuntu.com` and `api.launchpad.net` (host); `archive.ubuntu.com`/`security.ubuntu.com` or your apt mirror, `deb.nodesource.com`, and the npm registry (guest). On an egress-filtered network, blocking the apt mirrors fails provisioning *and* blanks QGA status polling, since `qemu-guest-agent` is one of the apt packages |
 
 ### Enable Snippets (Required Once)
 
@@ -135,13 +135,10 @@ Measured footprint, so you can size deliberately rather than guess:
 | Component | Disk |
 |---|---|
 | Ubuntu cloud image, booted | ~2.2 G |
-| `build-essential` toolchain | ~400 M |
-| `cmake` + `cmake-data` | ~75 M |
-| `git` | ~25 M |
-| Node.js (NodeSource) | ~120 M |
-| OpenClaw unpacked | 83.4 MiB across 8550 files, **plus 56 dependency trees** |
-| apt + npm caches | a few hundred MB |
-| **Realistic total before you store anything** | **~5 G** |
+| apt packages, all 10 incl. `build-essential` + `cmake` toolchain (**measured**) | 645 M |
+| Node.js (NodeSource) + OpenClaw incl. its 56 dependency trees and npm cache (**measured**) | 778 M |
+| **Measured total on top of the base image** | **~1.4 G (≈3.6 G with the booted base)** |
+| **With headroom for logs, state, and updates** | **~5 G is the planning number** |
 
 Hence the `8G` hard floor and `20G` warning. The `40G` default leaves room for logs, state, conversation history, and a browser later.
 
@@ -220,7 +217,7 @@ qm guest exec <VMID> -- cloud-init status --long
 | Code | Meaning |
 |------|---------|
 | `0` | Provisioning confirmed OK |
-| `1` | Setup failed before/during VM creation — VM auto-destroyed, nothing left behind |
+| `1` | Setup failed before provisioning began (anywhere up through VM start) — the VM, if it existed, is auto-destroyed. The host log always remains, and the cloud-init snippet remains if it was already written |
 | `2` | VM created and **deliberately kept**, but provisioning failed or went unconfirmed |
 
 Exit `2` is not a crash. It exists so scripted callers see a non-zero status while the VM survives for inspection.
@@ -269,7 +266,7 @@ stat -c '%U %G %a' ~/.openclaw ~/.openclaw/gateway-token
 
 The provisioning script asserts both of these and fails loudly rather than leaving you with a token you cannot read.
 
-### ❗ "bun/openclaw: command not found" — or a failed install
+### ❗ "openclaw: command not found" — or a failed install
 ```bash
 qm guest exec <VMID> -- cat /var/log/openclaw-install.fail
 qm guest exec <VMID> -- tail -n 50 /var/log/openclaw-provision.log
@@ -306,14 +303,18 @@ The default guidance in this README uses `--gateway-bind lan`, which listens on 
   ssh -L 18789:localhost:18789 <user>@<vm-ip>
   ```
 
-The initial **console password is printed to the host log** (`/var/log/openclaw-vm-<VMID>.log`). It's needed for console fallback and must be changed on first login, but be aware it's there.
+The initial **console password is printed to the host log** (`/var/log/openclaw-vm-<VMID>.log`). It's needed for console fallback and must be changed on first login. Both the log and the cloud-init snippet are created `0600` (v1.2.0+); if you ran an earlier version, tighten the old files once:
+
+```bash
+chmod 600 /var/log/openclaw-vm-*.log /var/lib/vz/snippets/openclaw-*.yaml
+```
 
 ---
 
 ## ⚠️ Known Limitations
 
 ### 🧪 Not yet validated on real hardware
-Every claim in this README is backed by static verification and simulation, not a live boot. The first run is the real test. Untested end-to-end: `npm install -g openclaw@latest`, the `--gateway-token` flag on your OpenClaw version, and `qm guest exec` availability on your node.
+The guest-side install has been executed for real in an Ubuntu 26.04 rootfs (see Status), but the Proxmox side has only run against stubs. Still untested end-to-end: the `qm`/QGA plumbing on a real node, and the `--gateway-token` flag on your OpenClaw version (documented upstream, but onboarding has not been executed here).
 
 ### 🖥️ amd64 only
 The cloud image URL is hard-coded to `amd64`. Edit `-server-cloudimg-amd64.img` → `-arm64.img` for ARM hosts.
@@ -328,7 +329,7 @@ Queries Launchpad for the newest active LTS, falling back to `noble`. **Risk:** 
 Cleans up after failure, not after a successful run. See [Useful Commands](#-useful-commands).
 
 ### 📄 Snippet files accumulate
-`qm destroy` does not remove `<snippet-dir>/openclaw-<VMID>.yaml`. Harmless, but they pile up across retries.
+`qm destroy` does not remove `<snippet-dir>/openclaw-<VMID>.yaml`. They pile up across retries — and each contains that VM's initial console password, so clean up the ones belonging to destroyed VMs.
 
 ---
 
