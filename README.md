@@ -172,7 +172,58 @@ ssh <user>@<vm-ip>
 openclaw onboard --install-daemon --gateway-bind lan --gateway-token "$(cat ~/.openclaw/gateway-token)"
 ```
 
-The wizard will ask for your LLM API key.
+The very first thing you'll see is a security disclaimer you must accept before setup continues:
+
+```
+OpenClaw 2026.7.1-2 (<version hash>) — Half butler, half debugger, full crustacean.
+
+  OPENCLAW
+
+OpenClaw setup
+
+◇ Security disclaimer
+│
+│  OpenClaw is a hobby project and still in beta. Expect sharp edges.
+│  By default, OpenClaw is a personal agent: one trusted operator boundary.
+│  This bot can read files and run actions if tools are enabled.
+│  A bad prompt can trick it into doing unsafe things.
+│
+│  OpenClaw is not a hostile multi-tenant boundary by default.
+│  If multiple users can message one tool-enabled agent, they share that
+│  delegated tool authority.
+│
+│  If you're not comfortable with security hardening and access control,
+│  don't run OpenClaw.
+│  Ask someone experienced to help before enabling tools or exposing it
+│  to the internet.
+│
+│  Recommended baseline
+│  - Pairing/allowlists + mention gating.
+│  - Multi-user/shared inbox: split trust boundaries (separate
+│    gateway/credentials, ideally separate OS users/hosts).
+│  - Sandbox + least-privilege tools.
+│  - Shared inboxes: isolate DM sessions (session.dmScope:
+│    per-channel-peer) and keep tool access minimal.
+│  - Keep secrets out of the agent's reachable filesystem.
+│  - Use the strongest available model for any bot with tools or
+│    untrusted inboxes.
+│
+│  Run regularly
+│  openclaw security audit --deep
+│  openclaw security audit --fix
+│
+│  Learn more
+│  - https://docs.openclaw.ai/gateway/security
+│
+◆  I understand this is personal-by-default and shared/multi-user use
+   requires lock-down. Continue?
+●  Yes
+○  No
+```
+
+**Select `Yes` to continue** — it's the default (the filled `●`), so pressing **Enter** accepts it. This is a single-operator VM you provisioned yourself, so the disclaimer's default posture applies; choosing `No` exits setup without configuring anything.
+
+The wizard will then ask for your LLM API key.
 
 > **About the token:** the script pre-generates `~/.openclaw/gateway-token`, but **nothing reads that file automatically** — OpenClaw reads auth from `gateway.auth` in `~/.openclaw/openclaw.json`, env vars, CLI flags, or an explicitly configured SecretRef. Passing `--gateway-token` is what links them. If your OpenClaw version lacks that flag, onboarding mints its own token instead — either way the **authoritative** token afterwards is `gateway.auth.token` in `openclaw.json`.
 
