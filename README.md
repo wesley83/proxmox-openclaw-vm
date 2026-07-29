@@ -169,7 +169,7 @@ ssh <user>@<vm-ip>
 ### 2. Onboard
 
 ```bash
-openclaw onboard --install-daemon --gateway-bind lan --gateway-token "$(cat ~/.openclaw/gateway-token)"
+openclaw onboard --install-daemon --gateway-token "$(cat ~/.openclaw/gateway-token)"
 ```
 
 This one command runs an interactive wizard with several prompts. Expect, roughly in this order:
@@ -206,6 +206,8 @@ Either way, you end up back at a shell prompt, ready for step 3.
 
 A gateway token is not optional for a LAN bind: **non-loopback binds refuse to start without a valid auth path** (fail-closed by design).
 
+> **`--gateway-bind` is deliberately not shown above.** We verified live that it has no effect here: `docs.openclaw.ai/cli/onboard` documents that flag as applying only under `--flow quickstart` or `--flow manual` — the default guided flow this command runs silently ignores it, and the gateway installs bound to `loopback` regardless of what you pass. `gateway install` (what `--install-daemon` runs under the hood) has no `--bind` flag at all — confirmed by the installed systemd unit's command line only ever showing `--port`, never `--bind`. **Bind mode is set explicitly in step 3, after the gateway is already running.**
+
 ### 3. Start the gateway
 
 Everything up to this point has only *installed and configured* OpenClaw — nothing is actually listening yet. The Control UI and gateway API don't exist as a running process until this step. Run it after the onboarding wizard above has returned control of the terminal (exit the first-chat session first if you're still in it):
@@ -223,6 +225,16 @@ What each line does, and why it matters:
 - **`systemctl --user enable --now openclaw-gateway.service`** — `--install-daemon` (back in step 2) only created the *unit file*; this is what actually runs it. `enable` registers it to start automatically on every future boot; `--now` also starts it immediately, in this session, without waiting for a reboot. Combined with the systemd lingering the provisioning script already turned on for this user, this is what makes OpenClaw an always-on service — running now, and still running after you log out, reboot the VM, or it crashes and gets restarted — rather than something tied to your SSH session staying open.
 
 - **`openclaw gateway status`** — a read-only check: confirms the systemd unit is actually active, and does a connectivity/auth probe against the gateway's WebSocket port to verify your token is recognized. This is what tells you the previous line actually worked, before you go looking for the Control UI in a browser and wonder why it won't load.
+
+**Check the output of that last command for `bind=loopback (127.0.0.1)`.** Since onboarding never applies `--gateway-bind` (see the note above), the gateway comes up loopback-only every time, even though this guide's Security section assumes a LAN bind. Set it explicitly now:
+
+```bash
+openclaw config set gateway.bind lan
+openclaw gateway restart
+openclaw gateway status
+```
+
+Confirm the new output shows `bind=lan` and `Listening` includes something like `0.0.0.0:18789` (not just `127.0.0.1`/`[::1]`) before trying the Control UI from outside the VM. Use `gateway restart` here, not a `gateway stop` + `gateway start` chain — OpenClaw's docs explicitly warn against substituting one for the other.
 
 ### 4. Use it
 
@@ -334,14 +346,14 @@ Failures *before* provisioning trigger cleanup: the VM is stopped, destroyed, an
 
 ## 🔒 Security — Read Before Exposing the Gateway
 
-The default guidance in this README uses `--gateway-bind lan`, which listens on **`0.0.0.0`**. OpenClaw's docs are blunt: *"Never expose the Gateway unauthenticated on 0.0.0.0."*
+The default guidance in this README has you set `gateway.bind` to `lan` in step 3, which listens on **`0.0.0.0`**. OpenClaw's docs are blunt: *"Never expose the Gateway unauthenticated on 0.0.0.0."*
 
 - Keep `gateway.auth.mode = "token"`. Non-loopback binds are fail-closed and will refuse to start without auth — that's a feature, don't work around it.
 - **This script does not configure a firewall.** Restrict port 18789 to a tight source-IP allowlist yourself.
 - The docs prefer **Tailscale** over a LAN bind. Note these are two different mechanisms:
   - **Tailscale Serve** — gateway stays on loopback, Tailscale proxies HTTPS in front (`openclaw gateway --tailscale serve`). *This is what the docs recommend.*
-  - **Tailnet bind** — `--gateway-bind tailnet` listens directly on the tailnet IP, no Serve layer.
-- For loopback-only access instead, onboard with `--gateway-bind loopback` and tunnel:
+  - **Tailnet bind** — `openclaw config set gateway.bind tailnet` (then `openclaw gateway restart`) listens directly on the tailnet IP, no Serve layer.
+- For loopback-only access instead, skip the `gateway.bind lan` step entirely (loopback is the untouched default) and tunnel:
   ```bash
   ssh -L 18789:localhost:18789 <user>@<vm-ip>
   ```
