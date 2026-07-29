@@ -49,7 +49,10 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 SCRIPT_VERSION="v1.1.0"
 REPO_URL="https://github.com/openclaw/openclaw"
 
-printf "${GREEN}${BOLD}"
+# %s form rather than putting variables in the format string: harmless today
+# (the colour vars hold only escape sequences), but a literal % in any of them
+# would corrupt output. Keeps the script shellcheck-clean.
+printf '%s%s' "${GREEN}" "${BOLD}"
   cat <<'EOF'
    ___                    ____ _
   / _ \ _ __   ___ _ __  / ___| | __ ___      __
@@ -58,11 +61,11 @@ printf "${GREEN}${BOLD}"
   \___/| .__/ \___|_| |_|\____|_|\__,_| \_/\_/
        |_|                                    (^)
 EOF
-printf "${RESET}\n"
+printf '%s\n' "${RESET}"
 
-printf "${CYAN}           OpenClaw VM Installer for Proxmox VE${RESET}\n"
-printf "${GREEN}                        ${SCRIPT_VERSION}${RESET}\n"
-printf "${CYAN}     ${REPO_URL}${RESET}\n\n"
+printf '%s           OpenClaw VM Installer for Proxmox VE%s\n' "${CYAN}" "${RESET}"
+printf '%s                        %s%s\n' "${GREEN}" "${SCRIPT_VERSION}" "${RESET}"
+printf '%s     %s%s\n\n' "${CYAN}" "${REPO_URL}" "${RESET}"
 
 ############################################
 # Defaults
@@ -695,6 +698,19 @@ qm set "$VM_ID" --ipconfig0 "ip=dhcp"
 ############################################
 mkdir -p "$SNIPPET_DIR"
 USERDATA="${SNIPPET_DIR}/openclaw-${VM_ID}.yaml"
+
+# This file contains the initial console password in plaintext, and PVE
+# re-reads it on every boot (--cicustom), so it cannot simply be deleted after
+# provisioning. Create it 0600 BEFORE writing: a bare 'cat >' uses root's
+# default umask (022), which would leave every VM's password world-readable on
+# the node, forever. PVE's daemons read it as root, so 0600 is sufficient.
+# NOTE: on NFS snippet storage with root_squash, root cannot read a 0600
+# root-owned file — use a storage without root_squash, or relax to 0640 with a
+# group PVE can read.
+install -m 600 /dev/null "$USERDATA" || {
+  ERROR "Could not create user-data snippet at ${USERDATA}"
+  exit 1
+}
 
 # The user-data is assembled in three parts so the provisioning script can be
 # embedded verbatim inside a QUOTED heredoc. That keeps every $ and backtick
