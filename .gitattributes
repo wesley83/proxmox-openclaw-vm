@@ -1,0 +1,6 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Shell scripts MUST be LF in the working tree too: a CRLF shebang makes
+# Linux fail with "bad interpreter" and \r contaminates every command.
+*.sh text eol=lf
