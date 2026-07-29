@@ -172,19 +172,33 @@ ssh <user>@<vm-ip>
 openclaw onboard --install-daemon --gateway-bind lan --gateway-token "$(cat ~/.openclaw/gateway-token)"
 ```
 
-The very first thing you'll see is a security disclaimer you must accept before setup continues:
+This one command runs an interactive wizard with several prompts. Expect, roughly in this order:
+
+**a. A security disclaimer** you must accept before anything else happens:
 
 ![OpenClaw onboarding security disclaimer — a TUI prompt summarizing the personal-agent trust model and recommended security baseline, ending with "Continue?" and Yes/No options, Yes selected by default](img/onboarding-security-disclaimer.png)
 
-**Select `Yes` to continue** — it's the default (the filled `●`), so pressing **Enter** accepts it. This is a single-operator VM you provisioned yourself, so the disclaimer's default posture applies; choosing `No` exits setup without configuring anything.
+**Select `Yes`** — it's the default (the filled `●`), so pressing **Enter** accepts it. This is a single-operator VM you provisioned yourself, so the disclaimer's default posture applies; choosing `No` exits setup without configuring anything.
 
-The wizard will then ask for your LLM API key.
+**b. LLM provider selection and auth** — OpenAI, Anthropic, xAI, Google, OpenRouter, or others; sign in or paste an API key here.
+
+**c. Messaging channel selection** — Telegram, WhatsApp, Slack, Discord, etc. Pick whichever you'll actually talk to the agent through; none is required by this script.
+
+**d. Web search provider selection**, after which workspace/Gateway/session setup runs automatically.
+
+**e. A first-chat session.** OpenClaw's docs describe this step as opening the Control UI dashboard in a browser (or printing its URL on headless systems) — but on a VM with no browser installed, we observed it drop straight into a local terminal chat instead, with the freshly-created agent introducing itself and asking to be named:
+
+![OpenClaw's first-chat session — a local embedded TUI chat where the newly onboarded agent says "Wake up, my friend!" and asks to be named, with a status line showing the model provider and token usage](img/onboarding-first-chat.png)
+
+This step is cosmetic, not structural — per OpenClaw's docs, your provider, channel, and web-search choices are already saved by this point and "workspace and Gateway settings remain untouched" by it. Chat with it to name your agent if you like, or exit with **Ctrl+C** and move on; either way, onboarding is done.
 
 > **About the token:** the script pre-generates `~/.openclaw/gateway-token`, but **nothing reads that file automatically** — OpenClaw reads auth from `gateway.auth` in `~/.openclaw/openclaw.json`, env vars, CLI flags, or an explicitly configured SecretRef. Passing `--gateway-token` is what links them. If your OpenClaw version lacks that flag, onboarding mints its own token instead — either way the **authoritative** token afterwards is `gateway.auth.token` in `openclaw.json`.
 
 A gateway token is not optional for a LAN bind: **non-loopback binds refuse to start without a valid auth path** (fail-closed by design).
 
 ### 3. Start the gateway
+
+Run this after the onboarding wizard above has returned control of the terminal (exit the first-chat session first if you're still in it):
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
