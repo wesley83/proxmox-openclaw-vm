@@ -202,11 +202,7 @@ This step is cosmetic, not structural — per OpenClaw's docs, your provider, ch
 
 Either way, you end up back at a shell prompt, ready for step 3.
 
-> **About the token:** the script pre-generates `~/.openclaw/gateway-token`, but **nothing reads that file automatically** — OpenClaw reads auth from `gateway.auth` in `~/.openclaw/openclaw.json`, env vars, CLI flags, or an explicitly configured SecretRef. Passing `--gateway-token` is what links them. If your OpenClaw version lacks that flag, onboarding mints its own token instead — either way the **authoritative** token afterwards is `gateway.auth.token` in `openclaw.json`.
-
-A gateway token is not optional for a LAN bind: **non-loopback binds refuse to start without a valid auth path** (fail-closed by design).
-
-> **`--gateway-bind` is deliberately not shown above.** We verified live that it has no effect here: `docs.openclaw.ai/cli/onboard` documents that flag as applying only under `--flow quickstart` or `--flow manual` — the default guided flow this command runs silently ignores it, and the gateway installs bound to `loopback` regardless of what you pass. `gateway install` (what `--install-daemon` runs under the hood) has no `--bind` flag at all — confirmed by the installed systemd unit's command line only ever showing `--port`, never `--bind`. **Bind mode is set explicitly in step 3, after the gateway is already running.**
+> **About the token — verified live, this matters:** the script pre-generates `~/.openclaw/gateway-token`, and the command above passes it via `--gateway-token`. But the default *guided* onboarding flow **silently ignores explicit gateway flags** (`docs.openclaw.ai/cli/onboard` scopes them to `--flow quickstart` / `--flow manual` only) — confirmed on a real run, where `gateway.auth.token` in `openclaw.json` did **not** match the file afterward. Onboarding mints its own random token you can't read back (`config get` redacts secrets). Step 3 fixes this in one line by making the file's token authoritative. The same applies to `--gateway-bind`: the gateway always installs bound to `loopback` regardless of what you pass (`gateway install` has no `--bind` flag at all — its systemd unit only ever carries `--port`).
 
 ### 3. Start the gateway
 
@@ -226,21 +222,60 @@ What each line does, and why it matters:
 
 - **`openclaw gateway status`** — a read-only check: confirms the systemd unit is actually active, and does a connectivity/auth probe against the gateway's WebSocket port to verify your token is recognized. This is what tells you the previous line actually worked, before you go looking for the Control UI in a browser and wonder why it won't load.
 
-**Check the output of that last command for `bind=loopback (127.0.0.1)`.** Since onboarding never applies `--gateway-bind` (see the note above), the gateway comes up loopback-only every time, even though this guide's Security section assumes a LAN bind. Set it explicitly now:
+**Then make your known token authoritative.** Onboarding minted a random token you can't read back (see the note in step 2); one line replaces it with the token the provisioning script generated, so `~/.openclaw/gateway-token` is the real credential from here on:
 
 ```bash
-openclaw config set gateway.bind lan
+openclaw config set gateway.auth.token "$(cat ~/.openclaw/gateway-token)"
 openclaw gateway restart
 openclaw gateway status
 ```
 
-Confirm the new output shows `bind=lan` and `Listening` includes something like `0.0.0.0:18789` (not just `127.0.0.1`/`[::1]`) before trying the Control UI from outside the VM. Use `gateway restart` here, not a `gateway stop` + `gateway start` chain — OpenClaw's docs explicitly warn against substituting one for the other.
+Use `gateway restart`, not a `gateway stop` + `gateway start` chain — OpenClaw's docs explicitly warn against substituting one for the other. Leave `bind` on its `loopback` default: as the next step explains, opening the port to the LAN doesn't get a browser into the Control UI anyway, and every recommended access path works with loopback.
 
-### 4. Use it
+### 4. Access the Control UI
 
-- **Control UI:** `http://<vm-ip>:18789`
-- **Logs:** `journalctl --user -u openclaw-gateway -f`
+**You cannot browse to `http://<vm-ip>:18789` — by design, not misconfiguration.** The Control UI creates a cryptographic *device identity* in your browser, which requires a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) — **HTTPS or localhost**. Plain HTTP to a LAN IP is neither, so the gateway rejects the WebSocket with `control ui requires device identity (use HTTPS or localhost secure context)` no matter how correct your token is. Verified the hard way; see Troubleshooting. Pick one of these instead:
+
+#### Option A — SSH tunnel (zero extra software; start here)
+
+From the machine whose browser you'll use (requires your key in the VM's `authorized_keys` — see step 1):
+
+```bash
+ssh -N -L 18789:127.0.0.1:18789 <user>@<vm-ip>
+```
+
+Leave that running (no output is normal), then open **`http://localhost:18789/`** and paste the token from `~/.openclaw/gateway-token` into the Gateway Token field — or append it directly: `http://localhost:18789/#token=<token>`. `localhost` is a secure context, so this works over plain HTTP.
+
+#### Option B — Tailscale Serve (HTTPS inside your tailnet, no port exposure)
+
+This is the method OpenClaw's own docs recommend. [Install Tailscale](https://tailscale.com/download/linux) in the VM (`tailscale up`), then:
+
+```bash
+openclaw config set gateway.tailscale.mode serve
+openclaw gateway restart
+```
+
+The gateway stays on loopback; Tailscale terminates HTTPS and serves it at `https://<vm-magicdns-name>/` to your tailnet only. Any device on your tailnet gets the Control UI with a valid secure context and no tunnel commands.
+
+#### Option C — Cloudflare Tunnel (HTTPS on your own domain)
+
+> Not covered by OpenClaw's docs — this is standard `cloudflared` practice applied to the gateway, tested against the same loopback + token setup as above.
+
+In the [Cloudflare Zero Trust dashboard](https://one.dash.cloudflare.com): **Networks → Tunnels → Create a tunnel**, name it (e.g. `openclaw`), and copy the connector install command it generates. Run that in the VM — it installs `cloudflared` as a service with the tunnel credentials baked in. Then add a **Public Hostname** to the tunnel: `openclaw.yourdomain.com` → service `http://localhost:18789`.
+
+Browse to `https://openclaw.yourdomain.com/` — HTTPS at Cloudflare's edge satisfies the secure context, `cloudflared` proxies (WebSockets included) to the loopback gateway, and token auth still gates every connection.
+
+**Do not stop at token auth here.** Unlike A and B, this puts the gateway on a public hostname reachable by the whole internet. Put a [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) application in front of the hostname (email OTP or your IdP) so unauthenticated visitors never reach the gateway at all — the token then becomes your second layer, not your only one.
+
+#### What `bind=lan` is actually for
+
+Only **non-browser** clients: native OpenClaw apps pointing at `ws://<vm-ip>:18789`, or a reverse proxy running on a *different* host. If you need that: `openclaw config set gateway.bind lan && openclaw gateway restart` — the fail-closed token requirement stays in force. It will never make `http://<vm-ip>:18789` work in a browser.
+
+#### Day-to-day references
+
+- **Logs:** `journalctl --user -u openclaw-gateway -f` (file log path shown in `gateway status`)
 - **Config:** `~/.openclaw/openclaw.json`
+- **Status:** `openclaw gateway status`
 
 ---
 
@@ -285,6 +320,17 @@ The auto-selected storage can't hold VM disks. Pick one explicitly:
 ```bash
 bash openclaw-vm.sh --storage local-zfs
 ```
+
+### ❗ Control UI: "Could not connect" from another machine
+Click **▶ Raw error** in the red box — if it says `control ui requires device identity (use HTTPS or localhost secure context)`, you're browsing `http://<vm-ip>:18789`, which **can never work**: the Control UI needs browser WebCrypto for its device identity, and that only exists in a secure context (HTTPS or localhost). No token fixes this. Use one of the step-4 access paths (SSH tunnel → `http://localhost:18789`, Tailscale Serve, or Cloudflare Tunnel).
+
+If the raw error is something else, get the server's version of events — tail the gateway log while clicking Connect once:
+
+```bash
+tail -f /tmp/openclaw-$(id -u)/openclaw-$(date +%F).log
+```
+
+The `reason=` field in the `closed before connect` line is the ground truth. A `1008` with an auth reason after the secure-context requirement is satisfied usually means the token in your browser isn't the one in `gateway.auth.token` — re-run the token-sync line from step 3 and paste the file token again (the UI caches an old token in the form field; clear it manually).
 
 ### ❗ "Permission denied (publickey)" when connecting to the VM
 You're almost certainly connecting from the wrong machine. The embedded SSH key is auto-detected from **the Proxmox node** (`/root/.ssh/id_ed25519.pub` or `id_rsa.pub`), not from wherever you're typing the `ssh` command. This fails at the handshake, before any password prompt — it's unrelated to the password-expiry issues below.
@@ -346,16 +392,17 @@ Failures *before* provisioning trigger cleanup: the VM is stopped, destroyed, an
 
 ## 🔒 Security — Read Before Exposing the Gateway
 
-The default guidance in this README has you set `gateway.bind` to `lan` in step 3, which listens on **`0.0.0.0`**. OpenClaw's docs are blunt: *"Never expose the Gateway unauthenticated on 0.0.0.0."*
+The recommended steady state in this README is the safest one: **gateway on loopback**, reached via SSH tunnel, Tailscale Serve, or a Cloudflare Tunnel (step 4). Nothing listens on the LAN unless you opt in.
 
-- Keep `gateway.auth.mode = "token"`. Non-loopback binds are fail-closed and will refuse to start without auth — that's a feature, don't work around it.
-- **This script does not configure a firewall.** Restrict port 18789 to a tight source-IP allowlist yourself.
-- The docs prefer **Tailscale** over a LAN bind. Note these are two different mechanisms:
-  - **Tailscale Serve** — gateway stays on loopback, Tailscale proxies HTTPS in front (`openclaw gateway --tailscale serve`). *This is what the docs recommend.*
-  - **Tailnet bind** — `openclaw config set gateway.bind tailnet` (then `openclaw gateway restart`) listens directly on the tailnet IP, no Serve layer.
-- For loopback-only access instead, skip the `gateway.bind lan` step entirely (loopback is the untouched default) and tunnel:
+- Keep `gateway.auth.mode = "token"`. Non-loopback binds are fail-closed and will refuse to start without auth — that's a feature, don't work around it. OpenClaw's docs are blunt: *"Never expose the Gateway unauthenticated on 0.0.0.0."*
+- **If you enable `bind=lan`** (only useful for native clients or an external reverse proxy — never for browsers): this script does not configure a firewall, so restrict port 18789 to a tight source-IP allowlist yourself.
+- **If you use a Cloudflare Tunnel**, the hostname is internet-reachable — put Cloudflare Access in front of it rather than relying on the gateway token alone (details in step 4, Option C).
+- A fourth mode exists for tailnet users who want a direct port instead of Serve: `openclaw config set gateway.bind tailnet` listens on the Tailscale IP only. Serve (Option B) is what OpenClaw's docs recommend, and it keeps the gateway on loopback.
+- **Rotate the token** if it may have leaked (pasted into a chat, shown in a screenshot, sent over an insecure channel):
   ```bash
-  ssh -L 18789:localhost:18789 <user>@<vm-ip>
+  openssl rand -hex 32 > ~/.openclaw/gateway-token
+  openclaw config set gateway.auth.token "$(cat ~/.openclaw/gateway-token)"
+  openclaw gateway restart
   ```
 
 The initial **console password is printed to the host log** (`/var/log/openclaw-vm-<VMID>.log`). It's needed for console fallback and must be changed on first login. Both the log and the cloud-init snippet are created `0600` (v1.2.0+); if you ran an earlier version, tighten the old files once:
