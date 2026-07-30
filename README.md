@@ -234,7 +234,11 @@ Use `gateway restart`, not a `gateway stop` + `gateway start` chain — OpenClaw
 
 ### 4. Access the Control UI
 
-**You cannot browse to `http://<vm-ip>:18789` — by design, not misconfiguration.** The Control UI creates a cryptographic *device identity* in your browser, which requires a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) — **HTTPS or localhost**. Plain HTTP to a LAN IP is neither, so the gateway rejects the WebSocket with `control ui requires device identity (use HTTPS or localhost secure context)` no matter how correct your token is. Verified the hard way; see Troubleshooting. Pick one of these instead:
+**You cannot browse to `http://<vm-ip>:18789` — by design, not misconfiguration.** The Control UI creates a cryptographic *device identity* in your browser, which requires a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) — **HTTPS or localhost**. Plain HTTP to a LAN IP is neither, so the gateway rejects the WebSocket no matter how correct your token is. This is exactly what that failure looks like — a valid, masked token entered correctly, same "Could not connect" every time:
+
+![OpenClaw Control UI "Could not connect" error, caused by browsing to a LAN IP over plain HTTP instead of a secure context — happens with a completely correct token](img/control-ui-wrong-way.png)
+
+The three numbered hints in that box are generic and won't fix this specific case (the URL/transport and token are already right) — the real cause only shows up in the "Raw error" expander or the server log; see Troubleshooting. Skip straight to one of these instead:
 
 #### Option A — SSH tunnel (zero extra software; start here)
 
@@ -322,6 +326,10 @@ bash openclaw-vm.sh --storage local-zfs
 ```
 
 ### ❗ Control UI: "Could not connect" from another machine
+If your screen looks like this — a correctly entered token, "Could not connect" regardless:
+
+![OpenClaw Control UI "Could not connect" error, caused by browsing to a LAN IP over plain HTTP instead of a secure context](img/control-ui-wrong-way.png)
+
 Click **▶ Raw error** in the red box — if it says `control ui requires device identity (use HTTPS or localhost secure context)`, you're browsing `http://<vm-ip>:18789`, which **can never work**: the Control UI needs browser WebCrypto for its device identity, and that only exists in a secure context (HTTPS or localhost). No token fixes this. Use one of the step-4 access paths (SSH tunnel → `http://localhost:18789`, Tailscale Serve, or Cloudflare Tunnel).
 
 If the raw error is something else, get the server's version of events — tail the gateway log while clicking Connect once:
