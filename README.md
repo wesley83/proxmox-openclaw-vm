@@ -273,6 +273,56 @@ Browse to `https://openclaw.yourdomain.com/` — HTTPS at Cloudflare's edge sati
 
 **Do not stop at token auth here.** Unlike A and B, this puts the gateway on a public hostname reachable by the whole internet. Put a [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) application in front of the hostname (email OTP or your IdP) so unauthenticated visitors never reach the gateway at all — the token then becomes your second layer, not your only one.
 
+#### Option D — nginx + self-signed TLS (one persistent LAN URL, no client-side setup)
+
+> Not covered by OpenClaw's docs or by this script — a standard nginx-as-TLS-terminator pattern applied to the loopback-bound gateway. Unlike A–C, there's nothing to run or keep open on the *client* side: once set up, `https://<vm-ip>/` just works from any device on your LAN, indefinitely. The tradeoff is a one-time "this certificate isn't trusted" browser warning (it's self-signed) and no access-control layer beyond the gateway token — closer in risk profile to `bind=lan` than to Tailscale or Cloudflare Access.
+
+In the VM:
+
+```bash
+sudo apt-get install -y nginx
+sudo mkdir -p /etc/nginx/ssl
+sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+  -keyout /etc/nginx/ssl/openclaw.key \
+  -out /etc/nginx/ssl/openclaw.crt \
+  -subj "/CN=openclaw"
+sudo chmod 600 /etc/nginx/ssl/openclaw.key
+```
+
+Then write `/etc/nginx/sites-available/openclaw`:
+
+```nginx
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+
+    ssl_certificate     /etc/nginx/ssl/openclaw.crt;
+    ssl_certificate_key /etc/nginx/ssl/openclaw.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    location / {
+        proxy_pass http://127.0.0.1:18789;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 86400s;
+    }
+}
+```
+
+```bash
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo ln -sf /etc/nginx/sites-available/openclaw /etc/nginx/sites-enabled/openclaw
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Browse to `https://<vm-ip>/` (accept the self-signed cert warning once), paste the token, connect. The gateway itself never leaves loopback — nginx is what's reachable on the LAN, on 443, not 18789. If you have a real domain pointed at this VM, swap the two `openssl`-generated files for a Let's Encrypt certificate instead (`sudo apt-get install -y certbot python3-certbot-nginx && sudo certbot --nginx`) and lose the browser warning entirely.
+
+This is a LAN-wide HTTPS port, not a tunnel — apply the same care as `bind=lan`: this script doesn't configure a firewall, so restrict 443 to the hosts that actually need it rather than leaving it open to your whole network.
+
 #### What `bind=lan` is actually for
 
 Only **non-browser** clients: native OpenClaw apps pointing at `ws://<vm-ip>:18789`, or a reverse proxy running on a *different* host. If you need that: `openclaw config set gateway.bind lan && openclaw gateway restart` — the fail-closed token requirement stays in force. It will never make `http://<vm-ip>:18789` work in a browser.
