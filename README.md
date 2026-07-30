@@ -2,7 +2,7 @@
 ### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
 Created by **Wesley Faulkner**
 
-**Current release: [v1.2.0](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.2.0)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Current release: [v1.2.1](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.2.1)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ---
 

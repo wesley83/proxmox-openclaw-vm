@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.2.0
+# Version: v1.2.1
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.2.0"
+SCRIPT_VERSION="v1.2.1"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today

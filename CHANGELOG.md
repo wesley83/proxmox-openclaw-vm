@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.2.1] - 2026-07-29
+
+### Added
+
+- **Option D — nginx + self-signed TLS** as a fourth Control UI access path
+  in the README, alongside the SSH tunnel, Tailscale Serve, and Cloudflare
+  Tunnel options from 1.2.0. Adopted after a comparative review of four
+  other Proxmox+OpenClaw installer projects; one of them solves the Control
+  UI's secure-context requirement by terminating a self-signed cert with
+  nginx in front of the loopback-bound gateway, giving a permanent
+  `https://<vm-ip>/` with no client-side tunnel to maintain. Applied our
+  own hardening standard rather than copying it as-is: the reference
+  implementation never `chmod`s the generated TLS private key (relies on
+  default umask); ours sets `600` explicitly, and carries the same
+  "this script doesn't firewall it for you" caution already given for
+  `bind=lan`, since a LAN-wide HTTPS port is the same exposure class.
+
 ## [1.2.0] - 2026-07-29
 
 `openclaw-vm.sh` itself is unchanged since this release shipped — every entry
@@ -163,5 +180,6 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.2.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.1.0
