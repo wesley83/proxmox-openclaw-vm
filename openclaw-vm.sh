@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.3.2
+# Version: v1.4.0
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.3.2"
+SCRIPT_VERSION="v1.4.0"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -92,13 +92,17 @@ MIN_MEMORY_MB=2048
 REC_MEMORY_MB=4096
 MIN_DISK_G=8
 REC_DISK_G=20
+# Free space on the target storage below which we consider it unable to host
+# this VM: warn, and (auto-selection only) offer or pick a roomier one. ~5G is
+# the measured provisioning footprint; 10 leaves headroom for npm cache + logs.
+REC_STORAGE_FREE_G=10
 UBUNTU_CODENAME="noble"   # Fallback if LTS auto-detection fails
 VM_USER="openclaw"
 NODE_MAJOR=26             # OpenClaw docs recommend Node 26
 OPENCLAW_VERSION="latest" # npm version or dist-tag; pin with --openclaw-version
 SSH_KEY_PATH="auto"       # auto-detect /root/.ssh/id_ed25519.pub or id_rsa.pub
 STORAGE_ID="auto"         # VM disk storage; set via --storage
-SNIPPET_STORAGE_ID="auto"
+SNIPPET_STORAGE_ID="auto" # cloud-init snippet storage; set via --snippet-storage
 DEBUG=0
 _UBUNTU_USER_SET=0        # Set to 1 if --ubuntu is passed on the command line
 
@@ -167,7 +171,10 @@ Options:
                           start with letter or _ and be <= 32 chars)
   --storage <id>          Proxmox storage for the VM disk (default: local-lvm
                           if present, else the first active storage with
-                          'images' content)
+                          'images' content). Auto-selection skips a storage
+                          without room; an explicit value is always honored
+  --snippet-storage <id>  Proxmox storage for the cloud-init snippet (default:
+                          the first storage with 'snippets' content)
   --ssh-key <path>        SSH public key file (default: auto-detect
                           /root/.ssh/id_ed25519.pub, then id_rsa.pub)
   --debug                 Enable bash debug tracing
@@ -235,6 +242,9 @@ while [[ $# -gt 0 ]]; do
     --user)
       [[ "${2:-}" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { ERROR "--user must be a valid Linux username (lowercase, starts with a-z or _, max 32 chars)"; exit 1; }
       VM_USER="$2"; shift 2;;
+    --snippet-storage)
+      [[ -n "${2:-}" && "${2:-}" != -* ]] || { ERROR "--snippet-storage requires a storage ID argument"; exit 1; }
+      SNIPPET_STORAGE_ID="$2"; shift 2;;
     --storage)
       [[ -n "${2:-}" && "${2:-}" != -* ]] || { ERROR "--storage requires a storage ID argument"; exit 1; }
       STORAGE_ID="$2"; shift 2;;
@@ -481,6 +491,85 @@ if [[ -z "${STORAGE}" ]]; then
   exit 1
 fi
 
+# Available space (KiB) for one active, images-capable storage. Empty if the
+# storage is absent/inactive or the column is unparseable — every caller treats
+# empty as "unknown" and degrades rather than guessing.
+storage_free_kib() {
+  pvesm status --content images 2>/dev/null | \
+    awk -v s="$1" 'NR>1 && $1==s && $3=="active" && $6 ~ /^[0-9]+$/ {print $6; exit}'
+}
+
+# Active images-capable storages with room, roomiest first: "<name> <KiB>".
+storages_with_room() {
+  pvesm status --content images 2>/dev/null | \
+    awk -v min="$(( REC_STORAGE_FREE_G * 1024 * 1024 ))" \
+      'NR>1 && $3=="active" && $6 ~ /^[0-9]+$/ && $6 >= min {print $1, $6}' | \
+    sort -k2,2nr
+}
+
+# Capacity-aware selection. ONLY for auto-selection: an explicit --storage is
+# the operator's decision and is never second-guessed, only warned about.
+#
+# Auto-selection is otherwise capacity-blind — it prefers local-lvm whenever
+# that is active, with no regard for whether anything fits. A full thin pool is
+# "active", so the script would pick it, download ~700 MB, create the VM, and
+# only then fail at qm importdisk. Observed on real hardware.
+if [[ "$STORAGE_ID" == "auto" || -z "$STORAGE_ID" ]]; then
+  _cur_kib="$(storage_free_kib "$STORAGE")"
+  if [[ "$_cur_kib" =~ ^[0-9]+$ ]] && \
+     (( _cur_kib < REC_STORAGE_FREE_G * 1024 * 1024 )); then
+    _cur_g=$(( _cur_kib / 1024 / 1024 ))
+    _alts="$(storages_with_room | awk -v skip="$STORAGE" '$1!=skip')"
+
+    if [[ -n "$_alts" ]]; then
+      WARN "Auto-selected storage '${STORAGE}' has only ${_cur_g}G available;"
+      WARN "provisioning wants ~${REC_STORAGE_FREE_G}G."
+
+      if [[ -t 0 ]]; then
+        # A terminal is attached, so ask rather than guess: putting VM data on
+        # an external or unexpected storage is exactly the kind of choice that
+        # should not happen silently. Reachable from the documented one-liner —
+        # bash -c "$(curl ...)" passes the script as an ARGUMENT, leaving stdin
+        # free (unlike curl | bash, where the script IS stdin).
+        echo
+        echo "Storages on this node with room for the VM disk:"
+        _n=0
+        while read -r _sname _skib; do
+          [[ -n "$_sname" ]] || continue
+          _n=$(( _n + 1 ))
+          printf '  %d) %-20s %sG available\n' "$_n" "$_sname" "$(( _skib / 1024 / 1024 ))"
+        done <<< "$_alts"
+        echo "  0) keep ${STORAGE} (${_cur_g}G) anyway"
+        echo
+        echo "Choose 1-${_n}, or press Enter to keep '${STORAGE}':"
+        # Never let a stray/absent answer pick a storage for you: anything not
+        # matching a listed number keeps the original choice.
+        if read -r _reply && [[ "$_reply" =~ ^[0-9]+$ ]] && \
+           (( _reply >= 1 && _reply <= _n )); then
+          STORAGE="$(printf '%s\n' "$_alts" | awk -v i="$_reply" 'NR==i{print $1}')"
+          OK "Using storage: ${STORAGE}"
+        else
+          WARN "Keeping '${STORAGE}'. If import fails, re-run with --storage <id>."
+        fi
+      else
+        # Nobody to ask. Switch to the roomiest storage that fits, and say so
+        # loudly — silence here would place VM data somewhere unexpected with
+        # no record of why.
+        _best="$(printf '%s\n' "$_alts" | awk 'NR==1{print $1}')"
+        _best_g="$(printf '%s\n' "$_alts" | awk 'NR==1{print int($2/1024/1024)}')"
+        if [[ -n "$_best" ]]; then
+          WARN "No terminal attached; auto-switching to '${_best}' (${_best_g}G available)."
+          WARN "Pass --storage ${STORAGE} to override this and use it anyway."
+          STORAGE="$_best"
+        fi
+      fi
+    else
+      WARN "Storage '${STORAGE}' has only ${_cur_g}G available and no other"
+      WARN "storage on this node has ${REC_STORAGE_FREE_G}G free either."
+    fi
+  fi
+fi
+
 STORAGE_CONTENT="$(
   awk -v target="${STORAGE}" '
     /^[a-z0-9_-]+:/{split($0,a,"[ :]+"); id=a[2]; inblock=(id==target)}
@@ -586,6 +675,8 @@ if [[ "$SNIPPET_STORAGE_ID" == "auto" || -z "$SNIPPET_STORAGE_ID" ]]; then
   fi
 
   OK "Auto-selected snippet storage: ${SNIPPET_STORAGE_ID}"
+else
+  INFO "Using user-selected snippet storage: ${SNIPPET_STORAGE_ID}"
 fi
 
 HAS_SNIP="$(

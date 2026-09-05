@@ -5,6 +5,49 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.4.0] - 2026-09-05
+
+Storage selection was capacity-blind: it preferred `local-lvm` whenever that
+was active, with no regard for whether anything would fit. That is exactly how
+the v1.3.0 hardware run failed — a full thin pool is still "active", so it was
+chosen while a 5.7 TB storage on the same node sat unused. v1.3.1 added a
+warning; this makes the *selection* itself account for space.
+
+### Added
+
+- **`--snippet-storage <id>`.** `SNIPPET_STORAGE_ID="auto"` had been declared
+  alongside `STORAGE_ID="auto"` since the initial commit, but unlike its
+  neighbor it was never wired to a flag — snippet storage could not be
+  overridden at all. Explicit values go through the same snippets-content
+  validation as auto-selected ones, and are now logged the way `--storage` is.
+- **Capacity-aware auto-selection, with a prompt when someone is there to
+  answer.** When the auto-selected storage has less than ~10 G free and another
+  active storage has room:
+  - **On a TTY**, it lists the storages with room and asks. Enter keeps the
+    original; so does any unrecognized input, so a stray keystroke cannot
+    relocate a VM. Verified against valid picks, `0`, empty, out-of-range,
+    non-numeric, negative, and EOF.
+  - **Non-interactively**, it switches to the roomiest storage that fits and
+    warns loudly, naming the flag to override. Chosen over failing fast because
+    thin pools are overprovisioned and "looks full" is not reliably fatal, and
+    over silence because relocating VM data deserves a record.
+  - **An explicit `--storage` is never overridden** — only warned about if it
+    looks tight. Auto-detection may guess; an operator's stated choice is not
+    second-guessed.
+
+  Prompting works with the documented one-liner because `bash -c "$(curl ...)"`
+  passes the script as an argument, leaving stdin free — verified. The usual
+  `curl | bash` makes the script itself stdin, which is why prompting is
+  impossible there and why this stays conditional on `[ -t 0 ]`.
+
+### Notes
+
+- This is the script's first interactive prompt. Every non-interactive path —
+  cron, CI, piped runs, and any run with `--storage` — behaves exactly as
+  before apart from clearer warnings, so unattended use is unaffected.
+- The menu's list loop reads from a here-string rather than stdin, so it does
+  not consume the answer intended for the prompt.
+
 ## [1.3.2] - 2026-09-05
 
 Follow-up to the v1.3.1 hardware findings. Asked whether the missing free-space
@@ -377,6 +420,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.4.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.2.1...v1.3.0

@@ -2,7 +2,7 @@
 ### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
 Created by **Wesley Faulkner**
 
-**Current release: [v1.3.2](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.3.2)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Current release: [v1.4.0](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.0)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
 
@@ -85,6 +85,20 @@ The script will:
 | `python3` | Optional but recommended — used for JSON parsing, with fallbacks throughout |
 | Network access | `cloud-images.ubuntu.com` and `api.launchpad.net` (host); `archive.ubuntu.com`/`security.ubuntu.com` or your apt mirror, `deb.nodesource.com`, and the npm registry (guest). On an egress-filtered network, blocking the apt mirrors fails provisioning *and* blanks QGA status polling, since `qemu-guest-agent` is one of the apt packages |
 
+### How storage is chosen
+
+Two storages matter: one holds the **VM disk**, one holds the **cloud-init snippet**. Both auto-detect, and both can be set explicitly with `--storage` and `--snippet-storage`.
+
+Auto-selection prefers `local-lvm`, falling back to the first active storage with `images` content. As of v1.4.0 it also considers **free space** — a storage that is active but full is no longer chosen blindly:
+
+- **You're at a terminal** → it lists the storages that have room and asks which to use. Press Enter to keep the original choice. Anything unrecognized also keeps the original, so a stray keystroke can't silently relocate your VM.
+- **No terminal** (cron, CI, a piped run) → it switches to the roomiest storage that fits and says so loudly, naming the flag to override it.
+- **You passed `--storage` explicitly** → it is honored exactly as given. An explicit choice is never second-guessed; you only get a warning if it looks tight.
+
+The prompt works with the documented one-liner because `bash -c "$(curl ...)"` passes the script as an *argument*, leaving stdin free. (The more common `curl | bash` makes the script itself stdin, which is why prompting is impossible there.)
+
+Nothing is destroyed either way — this only affects where a *new* disk is created.
+
 ### Enable Snippets (Required Once)
 
 Proxmox GUI →
@@ -106,7 +120,8 @@ This is the most common reason a first run fails immediately.
 | `-n`, `--node <major>` | Node.js major version | `26` (supported: `22 24 25 26`) |
 | `--openclaw-version <v>` | OpenClaw npm version or dist-tag. Pin it (e.g. `2026.9.1`) for reproducible builds — OpenClaw ships often and `latest` means two VMs built months apart get different software. Not validated against the registry, so a typo only surfaces once the VM is up | `latest` |
 | `--user <name>` | VM username (lowercase, starts with a–z or `_`, ≤ 32 chars) | `openclaw` |
-| `--storage <id>` | Proxmox storage for the VM disk | `local-lvm` if present, else first active storage with `images` content |
+| `--storage <id>` | Proxmox storage for the VM disk. An explicit value is always honored as-is; auto-selection skips a storage without room (see below) | `local-lvm` if present, else first active storage with `images` content |
+| `--snippet-storage <id>` | Proxmox storage for the cloud-init snippet | first storage with `snippets` content |
 | `--ssh-key <path>` | SSH public key file (must end in `.pub`; multiple keys supported) | `/root/.ssh/id_ed25519.pub` (or `id_rsa.pub`) |
 | `--debug` | Enable bash debug tracing (`set -x`) | off |
 | `-h`, `--help` | Show help and exit | — |
