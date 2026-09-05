@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.4.2] - 2026-09-05
+
+Re-verified the post-provision instructions against **2026.9.2** — the version
+the hardware run actually installed, one release newer than the 2026.9.1 all
+prior claims were tested on. Everything the script prints still holds; two
+wording problems surfaced.
+
+### Verified on 2026.9.2
+
+- `--install-daemon`, `--gateway-token`, `--skip-ui`, `--tui` all still exist.
+- `--gateway-token` is still honored: a live non-interactive onboard stored the
+  passed token verbatim, with `mode: token` and `bind: loopback`.
+- `gateway auth-token --show`, `gateway status --require-rpc`, and
+  `dashboard --no-open` all still exist with the documented behavior.
+- The systemd unit is still `openclaw-gateway.service`.
+- The Control UI secure-context requirement — step 4's entire justification —
+  is still in the dist bundle.
+
+### Fixed
+
+- **"The wizard will ask for your LLM API key" was misleading.** A
+  pay-as-you-go API key is not required: OpenClaw supports OAuth/device-code
+  sign-in against an existing subscription (ChatGPT, GitHub Copilot, Qwen,
+  MiniMax, xAI and others). This is not a fallback but the preferred path for
+  some models — upstream states `gpt-5.3-codex-spark` "is available only
+  through ChatGPT/Codex OAuth ... OpenAI API-key auth cannot use this model."
+  Both the printed instructions and README step 2 now say so, and README
+  documents `openclaw models auth login --provider openai` for signing in
+  after the fact.
+- Step 2's token note said "OpenClaw 2026.9.1 applies the flag correctly",
+  which read as version-specific; now `2026.9.1+`, with both releases named in
+  the README.
+
 ## [1.4.1] - 2026-09-05
 
 A clean v1.4.0 run on real hardware (PVE 7, same node as the v1.3.0 failure)
@@ -458,6 +491,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.4.2]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.1...v1.3.2

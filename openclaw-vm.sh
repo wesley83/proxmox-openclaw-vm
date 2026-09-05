@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.4.1
+# Version: v1.4.2
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.4.1"
+SCRIPT_VERSION="v1.4.2"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -1406,12 +1406,13 @@ echo "     'current' password even over SSH key auth):"
 echo "       ssh ${SSH_TARGET}"
 echo
 echo "  2) Run onboarding with the pre-generated gateway token. The wizard"
-echo "     will ask for your LLM API key:"
+echo "     will ask how to authenticate — paste an API key, or sign in to"
+echo "     a subscription (ChatGPT, Copilot, Qwen, and others are supported):"
 echo "       openclaw onboard --install-daemon \\"
 echo "         --gateway-token \"\$(cat ~/.openclaw/gateway-token)\""
 echo
 echo "     Passing the token is what links that file to the gateway config —"
-echo "     nothing reads it automatically. OpenClaw 2026.9.1 applies the flag"
+echo "     nothing reads it automatically. OpenClaw 2026.9.1+ applies the flag"
 echo "     correctly; older builds silently minted their own token, so the"
 echo "     value that counts is always gateway.auth.token in"
 echo "     ~/.openclaw/openclaw.json. 'openclaw gateway auth-token --show'"

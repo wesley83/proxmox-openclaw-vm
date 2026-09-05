@@ -2,7 +2,7 @@
 ### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
 Created by **Wesley Faulkner**
 
-**Current release: [v1.4.1](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.1)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Current release: [v1.4.2](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.2)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
 
@@ -215,7 +215,18 @@ This one command runs an interactive wizard with several prompts. Expect, roughl
 
 **a. A security disclaimer** you must accept before anything else happens. It summarizes the personal-agent trust model and asks `Continue?`, with `Yes` preselected — press **Enter**. This is a single-operator VM you provisioned yourself, so the default posture applies; choosing `No` exits without configuring anything.
 
-**b. LLM provider selection and auth** — OpenAI, Anthropic, xAI, Google, OpenRouter, or others; sign in or paste an API key here.
+**b. LLM provider selection and auth** — OpenAI, Anthropic, xAI, Google, OpenRouter, or others.
+
+You do **not** need a pay-as-you-go API key. Alongside API-key entry, OpenClaw supports OAuth sign-in against an existing subscription — ChatGPT, GitHub Copilot, Qwen, MiniMax, xAI and others each have a device-code or OAuth choice. Verified on 2026.9.2: signing in with ChatGPT is a first-class path, and some models are *only* reachable that way. Upstream's own wording on one of them:
+
+> `gpt-5.3-codex-spark` is available only through ChatGPT/Codex OAuth ... OpenAI API-key auth cannot use this model.
+
+If you skipped auth during onboarding, or want to add or switch later:
+
+```bash
+openclaw models auth login --provider openai   # OAuth / device-code sign-in
+openclaw models auth list                      # what's currently saved
+```
 
 **c. Messaging channel selection** — Telegram, WhatsApp, Slack, Discord, etc. Pick whichever you'll actually talk to the agent through; none is required by this script.
 
@@ -233,7 +244,7 @@ This step is cosmetic, not structural — your provider, channel, and web-search
 
 Either way, you end up back at a shell prompt, ready for step 3.
 
-> **About the token.** On **2026.9.1** this works as written: we re-verified live (non-interactive, root and non-root) that `--gateway-token` lands in `gateway.auth.token` exactly as passed. On **2026.7.1-2** it did **not** — the default onboarding flow silently ignored both `--gateway-token` and `--gateway-bind`, minting its own token instead. That matters if you pinned an older release with `--openclaw-version`, since pinning back reintroduces the bug.
+> **About the token.** On **2026.9.1 and 2026.9.2** this works as written: re-verified live on both (non-interactive) that `--gateway-token` lands in `gateway.auth.token` exactly as passed, with `mode: token` and `bind: loopback`. On **2026.7.1-2** it did **not** — the default onboarding flow silently ignored both `--gateway-token` and `--gateway-bind`, minting its own token instead. That matters if you pinned an older release with `--openclaw-version`, since pinning back reintroduces the bug.
 >
 > Either way, the value that actually counts afterward is `gateway.auth.token` in `~/.openclaw/openclaw.json` — not the file. Step 3 shows you how to check which one is live and how to force them into sync if they disagree.
 >
