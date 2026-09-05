@@ -367,6 +367,8 @@ Run these **on the Proxmox node** — note they use the guest agent, not SSH:
 qm status <VMID>
 
 # 2. Provisioning succeeded (prints installed versions)
+#    This is where you confirm --openclaw-version took effect:
+#    it reports the RESOLVED version, e.g. node=v26.5.1 openclaw=2026.9.1
 qm guest exec <VMID> -- cat /var/log/openclaw-install.ok
 
 # 3. Full provisioning log
