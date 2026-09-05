@@ -4,6 +4,12 @@ Created by **Wesley Faulkner**
 
 **Current release: [v1.3.0](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.3.0)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
+**Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
+
+> **Two things that trip up most first runs**, both covered below:
+> 1. **Snippets storage must be enabled once** in the Proxmox GUI, or the script fails immediately — [how](#enable-snippets-required-once).
+> 2. **`http://<vm-ip>:18789` will never load the Control UI**, no matter how correct your token is. That is by design, not a bug in this script — [why, and the four things that do work](#4-access-the-control-ui).
+
 ---
 
 ## 🚀 Overview
@@ -11,7 +17,7 @@ Created by **Wesley Faulkner**
 `openclaw-vm.sh` is a one-command installer that creates a fully configured **Ubuntu VM** on **Proxmox VE** and automatically installs:
 
 - 🟢 **Node.js** (from NodeSource — version-verified against OpenClaw's minimums)
-- 🦞 **OpenClaw** ([openclaw/openclaw](https://github.com/openclaw/openclaw)) — the personal AI assistant
+- 🦞 **OpenClaw** ([openclaw/openclaw](https://github.com/openclaw/openclaw)) — the personal AI assistant, at `latest` or a version you pin
 - 🔐 SSH access for a customizable user (default: `openclaw`)
 - ⏱️ **systemd lingering**, so the gateway daemon survives logout and starts at boot
 - 🎟️ A pre-generated gateway auth token (created *inside* the VM, never in host logs)
@@ -26,7 +32,9 @@ Created by **Wesley Faulkner**
 
 ## ⚠️ Status
 
-**Verified on real Proxmox VE hardware (PVE 7)** — that run was in July 2026, against `openclaw 2026.7.1-2`. A full run on a `local-lvm` + directory-snippet-storage node completed end to end: disk import/resize on thin-LVM, cloud-init, Node v26.5.1, gateway token generated, provisioning confirmed via QEMU Guest Agent — exit 0. The v1.3.0 changes since (the `--openclaw-version` flag and the rewritten post-install instructions) have **not** been re-run on hardware; they were verified against a live OpenClaw 2026.9.1 install and by host-side dry runs. Before that, the guest-side provisioning also ran green in an isolated Ubuntu 26.04 rootfs, and the host side was exercised against a mock PVE covering the happy path and three failure paths with correct exit codes, plus ShellCheck and cloud-init schema validation. Onboarding (`openclaw onboard`) and the gateway daemon itself are still unexercised past this point. See [Known Limitations](#-known-limitations).
+**Run end to end on real Proxmox VE hardware (PVE 7), including onboarding.** In July 2026, against `openclaw 2026.7.1-2`, a full run on a `local-lvm` + directory-snippet-storage node completed: disk import/resize on thin-LVM, cloud-init, Node v26.5.1, gateway token generated, provisioning confirmed via QEMU Guest Agent — exit 0. Onboarding was then completed interactively (LLM provider, messaging channel, web search), the gateway daemon was enabled and started as a systemd user service, and the Control UI was reached successfully through an SSH tunnel. Everything in [After the Script Finishes](#-after-the-script-finishes) is written from that run, including the Control UI secure-context problem in step 4 — which is documented here because it was hit for real, not anticipated.
+
+**What v1.3.0 changed has *not* been re-run on hardware.** The `--openclaw-version` flag and the rewritten post-install instructions were verified against a live OpenClaw 2026.9.1 install, by generating the cloud-init user-data and validating it against cloud-init 26.1's own schema checker, and by host-side dry runs of the argument parsing and the guest script's argument plumbing. That is real evidence, but it is weaker than a provisioning run — see [Known Limitations](#-known-limitations).
 
 ---
 
@@ -104,6 +112,12 @@ This is the most common reason a first run fails immediately.
 
 ```bash
 bash openclaw-vm.sh --memory 16384 --cores 8 --disk 80G --node 24 --user assistant
+```
+
+Or pin OpenClaw for a reproducible build:
+
+```bash
+bash openclaw-vm.sh --openclaw-version 2026.9.1
 ```
 
 ---
@@ -201,9 +215,11 @@ This step is cosmetic, not structural — your provider, channel, and web-search
 
 Either way, you end up back at a shell prompt, ready for step 3.
 
-> **About the token:** on OpenClaw **2026.7.1-2**, we confirmed live that the default onboarding flow **silently ignored** `--gateway-token` and `--gateway-bind` — `gateway.auth.token` in `openclaw.json` didn't match the file afterward, no matter what was passed. As of **2026.9.1**, we re-verified directly (non-interactive test run, both flags, root and non-root users) and both are now correctly applied — `gateway.auth.token` matched exactly, and `gateway.bind` took the requested value. If you're running an OpenClaw version between these where the old behavior might still apply, or just want a belt-and-suspenders check, **step 3 below verifies and fixes this in one line regardless of which behavior you get** — it's safe and idempotent either way. Newer versions also added `openclaw gateway auth-token --show`, which reveals the current token directly from an interactive terminal — handy for confirming which credential is actually live without our workaround at all.
+> **About the token.** On **2026.9.1** this works as written: we re-verified live (non-interactive, root and non-root) that `--gateway-token` lands in `gateway.auth.token` exactly as passed. On **2026.7.1-2** it did **not** — the default onboarding flow silently ignored both `--gateway-token` and `--gateway-bind`, minting its own token instead. That matters if you pinned an older release with `--openclaw-version`, since pinning back reintroduces the bug.
 >
-> We still don't recommend passing `--gateway-bind` here even though it now works: step 4 keeps the gateway on `loopback` regardless, since that's what the Control UI's secure-context requirement needs — see below.
+> Either way, the value that actually counts afterward is `gateway.auth.token` in `~/.openclaw/openclaw.json` — not the file. Step 3 shows you how to check which one is live and how to force them into sync if they disagree.
+>
+> Don't pass `--gateway-bind` here even though it now works: step 4 keeps the gateway on `loopback`, which is what the Control UI's secure-context requirement needs.
 
 ### 3. Start the gateway
 
@@ -257,23 +273,18 @@ From the machine whose browser you'll use (requires your key in the VM's `author
 ssh -N -L 18789:127.0.0.1:18789 <user>@<vm-ip>
 ```
 
-Leave that running (no output is normal), then open **`http://localhost:18789/`** and paste the token from `~/.openclaw/gateway-token` into the Gateway Token field — or append it directly: `http://localhost:18789/#token=<token>`. `localhost` is a secure context, so this works over plain HTTP.
+Leave that running — no output is normal — then open **`http://localhost:18789/`** and paste the token from `~/.openclaw/gateway-token` into the Gateway Token field, or append it: `http://localhost:18789/#token=<token>`. `localhost` is a secure context, so this works over plain HTTP.
 
-Rather than assembling that URL by hand, ask OpenClaw for it. Run this **on the VM**:
-
-```bash
-openclaw dashboard --no-open
-```
-
-It prints the Control UI URL with the current token already in it (`--no-open` stops it trying to launch a browser the VM doesn't have; `--json` gives you the parts separately). Copy that URL to your own machine, swapping the host for `localhost` while the tunnel is up.
-
-To check the tunnel itself rather than guessing from the browser, OpenClaw can probe through SSH for you — run this **from your machine**:
+**Two commands that save guessing:**
 
 ```bash
-openclaw gateway probe --ssh <user>@<vm-ip>
+openclaw dashboard --no-open              # on the VM: prints the URL, token included
+openclaw gateway probe --ssh <user>@<vm-ip>   # from your machine: tests the tunnel
 ```
 
-That reports reachability and whether auth is accepted, which separates "my tunnel is broken" from "my token is wrong" — the two failures that look identical in the browser.
+`dashboard --no-open` builds the Control UI URL with the live token so you don't assemble a `#token=` fragment by hand (`--no-open` stops it launching a browser the VM doesn't have; `--json` returns the parts separately). Copy it over, swapping the host for `localhost` while the tunnel is up.
+
+`gateway probe --ssh` reports reachability *and* whether auth was accepted — which is the difference between "my tunnel is broken" and "my token is wrong", two failures that look identical in the browser.
 
 #### Option B — Tailscale Serve (HTTPS inside your tailnet, no port exposure)
 
@@ -354,7 +365,9 @@ Only **non-browser** clients: native OpenClaw apps pointing at `ws://<vm-ip>:187
 
 - **Logs:** `journalctl --user -u openclaw-gateway -f` (file log path shown in `gateway status`)
 - **Config:** `~/.openclaw/openclaw.json`
-- **Status:** `openclaw gateway status`
+- **Status:** `openclaw gateway status --require-rpc`
+- **Health:** `openclaw doctor --lint`
+- **Token:** `openclaw gateway auth-token --show`
 
 ---
 
@@ -422,7 +435,7 @@ If your screen looks like this — a correctly entered token, "Could not connect
 
 ![OpenClaw Control UI "Could not connect" error, caused by browsing to a LAN IP over plain HTTP instead of a secure context](img/control-ui-wrong-way.png)
 
-Click **▶ Raw error** in the red box — if it says `control ui requires device identity (use HTTPS or localhost secure context)`, you're browsing `http://<vm-ip>:18789`, which **can never work**: the Control UI needs browser WebCrypto for its device identity, and that only exists in a secure context (HTTPS or localhost). No token fixes this. Use one of the step-4 access paths (SSH tunnel → `http://localhost:18789`, Tailscale Serve, or Cloudflare Tunnel).
+Click **▶ Raw error** in the red box — if it says `control ui requires device identity (use HTTPS or localhost secure context)`, you're browsing `http://<vm-ip>:18789`, which **can never work**: the Control UI needs browser WebCrypto for its device identity, and that only exists in a secure context (HTTPS or localhost). No token fixes this. Use one of the four step-4 access paths: SSH tunnel → `http://localhost:18789` (A), Tailscale Serve (B), Cloudflare Tunnel (C), or nginx + self-signed TLS (D).
 
 If the raw error is something else, get the server's version of events — tail the gateway log while clicking Connect once:
 
@@ -492,18 +505,20 @@ Failures *before* provisioning trigger cleanup: the VM is stopped, destroyed, an
 
 ## 🔒 Security — Read Before Exposing the Gateway
 
-The recommended steady state in this README is the safest one: **gateway on loopback**, reached via SSH tunnel, Tailscale Serve, or a Cloudflare Tunnel (step 4). Nothing listens on the LAN unless you opt in.
+The recommended steady state in this README is the safest one: **gateway on loopback**, reached via one of the four step-4 access paths (SSH tunnel, Tailscale Serve, Cloudflare Tunnel, or nginx + TLS). Nothing listens on 0.0.0.0 unless you opt in — and of the four, only the nginx option puts a port on your LAN.
 
 - Keep `gateway.auth.mode = "token"`. Non-loopback binds are fail-closed and will refuse to start without auth — that's a feature, don't work around it. OpenClaw's docs are blunt: *"Never expose the Gateway unauthenticated on 0.0.0.0."*
 - **If you enable `bind=lan`** (only useful for native clients or an external reverse proxy — never for browsers): this script does not configure a firewall, so restrict port 18789 to a tight source-IP allowlist yourself.
 - **If you use a Cloudflare Tunnel**, the hostname is internet-reachable — put Cloudflare Access in front of it rather than relying on the gateway token alone (details in step 4, Option C).
 - A fourth mode exists for tailnet users who want a direct port instead of Serve: `openclaw config set gateway.bind tailnet` listens on the Tailscale IP only. Serve (Option B) is what OpenClaw's docs recommend, and it keeps the gateway on loopback.
-- **Rotate the token** if it may have leaked (pasted into a chat, shown in a screenshot, sent over an insecure channel):
+- **Rotate the token** if it may have leaked — pasted into a chat, shown in a screenshot or screen share, sent over an insecure channel, or committed anywhere. Treat any of those as a burned credential; rotation is cheap:
   ```bash
   openssl rand -hex 32 > ~/.openclaw/gateway-token
   openclaw config set gateway.auth.token "$(cat ~/.openclaw/gateway-token)"
   openclaw gateway restart
+  openclaw gateway auth-token --show     # confirm the new one is live
   ```
+  Any browser holding the old token stops working immediately — that is the point. The Control UI caches the last token you typed, so clear that field before reconnecting.
 
 The initial **console password is printed to the host log** (`/var/log/openclaw-vm-<VMID>.log`). It's needed for console fallback and must be changed on first login. Both the log and the cloud-init snippet are created `0600` (v1.2.0+); if you ran an earlier version, tighten the old files once:
 
@@ -587,6 +602,8 @@ A few things in this script look odd and are load-bearing. Before "simplifying" 
 
 - **Status is polled via the QEMU Guest Agent, never SSH.** `chpasswd: expire: true` makes PAM reject every no-TTY SSH command for the user until the password is changed interactively. SSH-based polling *cannot* succeed — it would stall the full timeout and falsely report failure on every run.
 - **The cloud-init user-data is assembled in three heredocs** (interpolated → quoted → interpolated). The provisioning script lives inside the quoted one so every `$` and backtick stays literal, eliminating a whole class of escaping bugs.
+- **Values reach the guest script as positional arguments, never by interpolation.** Because that middle heredoc is quoted, writing `${OPENCLAW_VERSION}` inside it would arrive in the guest as a literal string and expand to empty — silently running `npm install -g openclaw@`. The user, Node major, and OpenClaw version are passed as `$1`/`$2`/`$3` from `runcmd` instead, and the guest asserts all three with `${N:?...}` so a half-applied edit fails loudly at first boot rather than installing the wrong thing.
+- **`--openclaw-version` is validated by an anchored regex, and that regex is the security boundary** — not the quoting around it. The value is interpolated into runcmd YAML and then into a single-quoted argument inside a `bash -c` string; requiring a leading alphanumeric is what rejects `-`/`--` (npm flag injection) and `@`/`/` (package-spec substitution like `github:owner/repo`) before it ever gets there.
 - **The imported disk volid is read back from `qm config`**, not reconstructed. Directory/NFS storages produce `storage:VMID/vm-VMID-disk-0.raw`, and the disk index is the lowest *free* one — a guess can silently attach a stale orphan.
 - **The apt lock timeout is written to `apt.conf.d`**, not passed with `-o`, because the NodeSource setup script runs its own apt commands internally.
 - **The Node version is re-verified after install** rather than trusting apt. Ubuntu's own `nodejs` is 18, which silently breaks OpenClaw.
