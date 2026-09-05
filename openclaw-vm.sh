@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.3.1
+# Version: v1.3.2
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.3.1"
+SCRIPT_VERSION="v1.3.2"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -291,6 +291,41 @@ fi
 if HOST_THREADS="$(nproc 2>/dev/null)" && [[ "$HOST_THREADS" =~ ^[0-9]+$ ]]; then
   (( CORES > HOST_THREADS )) && \
     WARN "--cores ${CORES} exceeds this node's ${HOST_THREADS} CPU threads (overcommit; allowed but may hurt other guests)."
+fi
+
+# Memory overcommit, the counterpart to the cores check above. Warn-only for the
+# same reason: ballooning and overcommit are legitimate on a homelab node. But
+# unlike spare CPU threads, memory the host does not have makes `qm start` fail
+# outright or pushes the node into swap, so it is worth saying out loud.
+HOST_AVAIL_MB="$(awk '/^MemAvailable:/{print int($2/1024); exit}' /proc/meminfo 2>/dev/null)"
+if [[ "$HOST_AVAIL_MB" =~ ^[0-9]+$ ]] && (( HOST_AVAIL_MB > 0 )); then
+  if (( MEMORY_MB > HOST_AVAIL_MB )); then
+    WARN "--memory ${MEMORY_MB} MB exceeds this node's ${HOST_AVAIL_MB} MB currently available."
+    WARN "The VM may fail to start, or push the node into swap. Lower --memory,"
+    WARN "or free memory on the node first."
+  fi
+else
+  DEBUG "Could not read MemAvailable; skipping the host memory advisory."
+fi
+
+# The cloud image downloads to /tmp on THIS node before it is imported. On a
+# typical Proxmox install / is a modest LV while local-lvm takes the rest, so a
+# ~700 MB image can fill it. Worth catching here: curl's failure is guarded, but
+# it reports "Download failed: <url>", which reads as a network problem and
+# sends you debugging the wrong thing. df -Pk is POSIX, 1K blocks, column 4.
+IMG_STAGE_DIR="${TMPDIR:-/tmp}"
+TMP_AVAIL_KB="$(df -Pk "$IMG_STAGE_DIR" 2>/dev/null | awk 'NR==2{print $4; exit}')"
+if [[ "$TMP_AVAIL_KB" =~ ^[0-9]+$ ]] && (( TMP_AVAIL_KB > 0 )); then
+  # Cloud images run ~600-800 MB; 2G leaves room for the download plus the
+  # qemu-img check that follows it.
+  if (( TMP_AVAIL_KB < 2097152 )); then
+    WARN "${IMG_STAGE_DIR} has only $(( TMP_AVAIL_KB / 1024 )) MB free on this node."
+    WARN "The Ubuntu cloud image (~700 MB) is staged there before import."
+    WARN "If it runs out mid-download the error reads as a failed download, not"
+    WARN "a full disk. Free space, or re-run with TMPDIR=/path/to/roomier."
+  fi
+else
+  DEBUG "Could not read free space for ${IMG_STAGE_DIR}; skipping the advisory."
 fi
 
 ############################################
@@ -686,7 +721,9 @@ fi
 # Download Ubuntu cloud image
 ############################################
 IMG_URL="https://cloud-images.ubuntu.com/${UBUNTU_CODENAME}/current/${UBUNTU_CODENAME}-server-cloudimg-amd64.img"
-IMG_FILE="$(mktemp /tmp/ubuntu-cloudimg-XXXXXX.img)"
+# Honors TMPDIR so the ~700 MB image can be staged somewhere roomier than / on
+# nodes where / is a small LV. Defaults to /tmp, which is the old behavior.
+IMG_FILE="$(mktemp "${TMPDIR:-/tmp}/ubuntu-cloudimg-XXXXXX.img")"
 
 INFO "Downloading cloud image:"
 INFO "  $IMG_URL"

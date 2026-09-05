@@ -2,7 +2,7 @@
 ### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
 Created by **Wesley Faulkner**
 
-**Current release: [v1.3.1](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.3.1)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Current release: [v1.3.2](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.3.2)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
 
@@ -80,6 +80,8 @@ The script will:
 | SSH key | `/root/.ssh/id_ed25519.pub` or `id_rsa.pub` **on the Proxmox node** (or pass `--ssh-key`). This is the node's own key, not your desktop's — see the note below |
 | `qm`, `pvesh`, `pvesm`, `curl`, `qemu-img`, `ip`, `awk` | Pre-installed on Proxmox; verified by the script |
 | Free space | ~10 G on the target storage. Provisioning writes roughly 5 G (cloud image + apt + Node + OpenClaw); the rest is headroom for the npm cache, logs, and state. The script warns before downloading anything if the storage reports less |
+| Staging space | ~2 G free in `/tmp` on the node — the cloud image is downloaded there before import. Set `TMPDIR=/path` to stage it elsewhere if `/` is a small LV |
+| Host RAM | Enough free memory for `--memory` (default `8192` MB). Overcommit is allowed and only warned about, but a VM the node cannot fit will fail to start |
 | `python3` | Optional but recommended — used for JSON parsing, with fallbacks throughout |
 | Network access | `cloud-images.ubuntu.com` and `api.launchpad.net` (host); `archive.ubuntu.com`/`security.ubuntu.com` or your apt mirror, `deb.nodesource.com`, and the npm registry (guest). On an egress-filtered network, blocking the apt mirrors fails provisioning *and* blanks QGA status polling, since `qemu-guest-agent` is one of the apt packages |
 

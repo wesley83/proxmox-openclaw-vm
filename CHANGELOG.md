@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.3.2] - 2026-09-05
+
+Follow-up to the v1.3.1 hardware findings. Asked whether the missing free-space
+check had been *removed* at some point, so the history was audited: it had not.
+It never existed in this script (9 commits, no removals), and it is absent from
+`proxmox-bun-vm` too, so it was not inherited and dropped in the derivation —
+it was a gap, not a regression. Comparing the two scripts' full check
+inventories, this one has 83 guards to the parent's 50, and every parent check
+has an equal-or-stronger equivalent here.
+
+That reframed the question usefully: rather than hunting for removed checks,
+audit for *other gaps of the same class* — failures that happen expensively
+late but are cheaply detectable up front. Two more turned up.
+
+### Added
+
+- **Host memory advisory.** The script already warned when `--cores` exceeded
+  the node's CPU threads, but never compared `--memory` against available host
+  RAM — an asymmetry, and the more damaging of the two, since memory the node
+  does not have makes `qm start` fail outright or pushes it into swap. Reads
+  `MemAvailable` from `/proc/meminfo`; warn-only, matching the cores precedent,
+  because overcommit and ballooning are legitimate on a homelab node.
+- **Image staging space advisory.** The cloud image is downloaded to `/tmp` on
+  the node before import. On a typical Proxmox install `/` is a modest LV while
+  `local-lvm` takes the rest, so a ~700 MB image can fill it — and the existing
+  guard reports `Download failed: <url>`, which reads as a network problem and
+  sends you debugging the wrong thing. Warns when the staging filesystem has
+  under 2 G, via POSIX `df -Pk`.
+
+### Changed
+
+- **The image staging directory now honors `TMPDIR`** (`mktemp
+  "${TMPDIR:-/tmp}/..."`, previously a hardcoded `/tmp`). This exists so the
+  advisory above can offer a real remedy rather than just naming the problem;
+  default behavior is unchanged.
+
+Both advisories are fail-soft: an unreadable `/proc/meminfo` or unparseable
+`df` output skips the check rather than blocking a run. Verified on real Linux
+(values parse correctly) and against forced low/healthy/unreadable inputs.
+
 ## [1.3.1] - 2026-09-05
 
 Findings from the first v1.3.0 run on real hardware (PVE 7, pve2). The run
@@ -337,6 +377,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.3.2]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.2.0...v1.2.1
