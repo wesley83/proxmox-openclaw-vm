@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.3.0
+# Version: v1.3.1
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.3.0"
+SCRIPT_VERSION="v1.3.1"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -382,6 +382,23 @@ cleanup() {
   # on read() of the still-open pipe), then wait for tee to finish flushing.
   exec >/dev/null 2>&1
   wait "${TEE_PID:-}" 2>/dev/null || true
+
+  # Normalize the status to the documented contract (0/1/2, plus the signal
+  # codes). Several qm calls are intentionally unguarded, and under set -e they
+  # otherwise propagate the TOOL's status — a full thin pool makes
+  # `qm importdisk` exit 5, which a caller branching on 0/1/2 misreads as an
+  # unknown state. 130/143 are deliberate and preserved (128+SIGINT/SIGTERM).
+  # Calling exit inside an EXIT trap sets the final status; bash does not
+  # re-enter the trap.
+  case $exit_code in
+    0|2|130|143) exit "$exit_code" ;;
+    *)
+      if [[ $VM_CREATED -eq 1 && $KEEP_VM -eq 1 ]]; then
+        exit 2
+      fi
+      exit 1
+      ;;
+  esac
 }
 # cleanup hangs off EXIT only. Signals must EXIT THROUGH it, not run it
 # directly: a signal trap that merely returns lets bash RESUME the script —
@@ -445,6 +462,41 @@ if [[ "$STORAGE_CONTENT" != *images* ]]; then
 fi
 
 OK "Using disk storage: ${STORAGE}"
+
+# Free-space advisory. Same motive as the live 'active' check above: without it
+# a full storage is only discovered at qm importdisk — AFTER a ~600 MB download
+# and VM creation, which then get thrown away. An LVM-thin pool at its data
+# threshold fails there with "Cannot create new thin volume".
+#
+# WARN-only, and deliberately so:
+#   - Thin pools are overprovisioned by design, so "available" is a soft number;
+#     a 40G volume does not consume 40G up front.
+#   - pvesm reports in KiB. If that ever changes, or the row can't be parsed, a
+#     hard failure here would block runs that would actually succeed.
+# Same fail-soft posture as get_latest_lts(): never block on an advisory.
+STORAGE_AVAIL_KIB="$(pvesm status --content images 2>/dev/null | \
+  awk -v s="$STORAGE" 'NR>1 && $1==s && $3=="active" {print $6; exit}')"
+if [[ "$STORAGE_AVAIL_KIB" =~ ^[0-9]+$ ]] && [[ "$STORAGE_AVAIL_KIB" -gt 0 ]]; then
+  STORAGE_AVAIL_G=$(( STORAGE_AVAIL_KIB / 1024 / 1024 ))
+  # ~5G is the measured floor for image + apt + Node + OpenClaw; 10G leaves room
+  # for the npm cache and logs before the assistant stores anything.
+  if [[ "$STORAGE_AVAIL_G" -lt 10 ]]; then
+    WARN "Storage '${STORAGE}' reports only ${STORAGE_AVAIL_G}G available."
+    WARN "Provisioning writes roughly 5G (image + apt + Node + OpenClaw) and"
+    WARN "wants ~10G of headroom. This run may fail at disk import or part-way"
+    WARN "through the guest install."
+    WARN "Check:  pvesm status --content images"
+    if [[ "$STORAGE_AVAIL_G" -lt 4 ]]; then
+      WARN "For LVM-thin also check the pool's data usage:"
+      WARN "  lvs -o lv_name,lv_size,data_percent,metadata_percent"
+    fi
+    WARN "Free space, or pick another storage with --storage <id>."
+  else
+    DEBUG "Storage ${STORAGE} available: ${STORAGE_AVAIL_G}G"
+  fi
+else
+  DEBUG "Could not read available space for ${STORAGE}; skipping the advisory."
+fi
 
 ############################################
 # Snippet auto-detect
@@ -711,7 +763,19 @@ OK "VM created."
 INFO "Importing disk into ${STORAGE}..."
 
 # qm importdisk, NOT qm disk import — the latter is PVE 8+ only.
-qm importdisk "$VM_ID" "$IMG_FILE" "$STORAGE"
+# Guarded so this exits 1 per the documented contract: unguarded, qm's own
+# status propagates (a full thin pool exits 5), which scripted callers that
+# branch on 0/1/2 would misread.
+qm importdisk "$VM_ID" "$IMG_FILE" "$STORAGE" || {
+  ERROR "Disk import into '${STORAGE}' failed — see the qm output above."
+  ERROR "Most common cause is no free space. An LVM-thin pool at its data"
+  ERROR "threshold reports: 'Cannot create new thin volume, free space in thin"
+  ERROR "pool ... reached threshold'."
+  ERROR "Check free space:  pvesm status --content images"
+  ERROR "For LVM-thin also:  lvs -o lv_name,lv_size,data_percent,metadata_percent"
+  ERROR "Then free space, or re-run with --storage <id> pointing at another one."
+  exit 1
+}
 
 # Read the actual volid back instead of reconstructing it. On file-based
 # storages (dir/NFS/CIFS) importdisk produces '<storage>:<vmid>/vm-<vmid>-disk-0.raw'

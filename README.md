@@ -2,7 +2,7 @@
 ### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
 Created by **Wesley Faulkner**
 
-**Current release: [v1.3.0](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.3.0)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Current release: [v1.3.1](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.3.1)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
 
@@ -79,6 +79,7 @@ The script will:
 | Snippets storage | A storage with **Snippets** content enabled *(once only — see below)* |
 | SSH key | `/root/.ssh/id_ed25519.pub` or `id_rsa.pub` **on the Proxmox node** (or pass `--ssh-key`). This is the node's own key, not your desktop's — see the note below |
 | `qm`, `pvesh`, `pvesm`, `curl`, `qemu-img`, `ip`, `awk` | Pre-installed on Proxmox; verified by the script |
+| Free space | ~10 G on the target storage. Provisioning writes roughly 5 G (cloud image + apt + Node + OpenClaw); the rest is headroom for the npm cache, logs, and state. The script warns before downloading anything if the storage reports less |
 | `python3` | Optional but recommended — used for JSON parsing, with fallbacks throughout |
 | Network access | `cloud-images.ubuntu.com` and `api.launchpad.net` (host); `archive.ubuntu.com`/`security.ubuntu.com` or your apt mirror, `deb.nodesource.com`, and the npm registry (guest). On an egress-filtered network, blocking the apt mirrors fails provisioning *and* blanks QGA status polling, since `qemu-guest-agent` is one of the apt packages |
 
@@ -398,8 +399,11 @@ qm guest exec <VMID> -- cloud-init status --long
 | `0` | Provisioning confirmed OK |
 | `1` | Setup failed before provisioning began (anywhere up through VM start) — the VM, if it existed, is auto-destroyed. The host log always remains, and the cloud-init snippet remains if it was already written |
 | `2` | VM created and **deliberately kept**, but provisioning failed or went unconfirmed |
+| `130` / `143` | Interrupted by SIGINT (Ctrl-C) or SIGTERM. The VM is destroyed unless it had already been kept |
 
 Exit `2` is not a crash. It exists so scripted callers see a non-zero status while the VM survives for inspection.
+
+**These are the only codes the script emits.** Several `qm` calls are intentionally unguarded, and under `set -e` they would otherwise propagate the tool's own status — a full LVM-thin pool makes `qm importdisk` exit `5`, for instance. The cleanup trap normalizes any such status to `1`, or to `2` when the VM was deliberately kept, so a caller branching on `0`/`1`/`2` never sees an unexpected number. (Fixed in v1.3.1; earlier versions could leak a tool's exit code.)
 
 ---
 
@@ -422,6 +426,24 @@ Two caveats worth knowing:
 
 ### ❗ "No storage with 'snippets' content found"
 Enable snippets: **Datacenter → Storage → local → Edit → check `Snippets`**.
+
+### ❗ "Cannot create new thin volume" / "thin pool ... reached threshold"
+Your LVM-thin pool is out of *data* space — this is a storage problem, not a script one. Thin pools are overprovisioned, so the pool can be full even though the volumes on it look modest.
+
+```bash
+pvesm status --content images
+lvs -o lv_name,lv_size,data_percent,metadata_percent
+```
+
+If `data_percent` is at or near 100, free space before retrying. Options, roughly in order of least regret:
+
+- Delete unused VMs/disks (`qm destroy <VMID> --purge`), or old snapshots, which are usually the quiet culprit.
+- Point this run at a different storage: `bash openclaw-vm.sh --storage <id>`. Any active storage with `images` content works — including a directory storage on a separate disk.
+- Extend the pool if the volume group has room: `lvextend -L +50G pve/data`.
+
+Watch `metadata_percent` too — a thin pool can exhaust *metadata* while data space still looks fine, and that fails the same way.
+
+The script warns before downloading anything if the target storage reports under ~10 G available, so you normally see this coming. That advisory is warn-only: thin pools are overprovisioned by design, so a low number is not always fatal and the script won't refuse to run on it.
 
 ### ❗ "Storage 'X' does not support VM disk images"
 The auto-selected storage can't hold VM disks. Pick one explicitly:

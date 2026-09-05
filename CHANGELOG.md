@@ -5,6 +5,62 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.3.1] - 2026-09-05
+
+Findings from the first v1.3.0 run on real hardware (PVE 7, pve2). The run
+failed at disk import because the node's `local-lvm` thin pool was out of data
+space — an environmental problem, not a script defect. Everything up to that
+point worked, including v1.3.0's new code, and cleanup destroyed the VM and
+removed the downloaded image correctly. But the failure exposed two real gaps.
+
+### Fixed
+
+- **The script emitted an undocumented exit code.** `qm importdisk` was
+  unguarded, so under `set -e` its own status propagated — the failed run
+  exited `5`, while the README documents `0`/`1`/`2`. Seven other `qm` calls
+  could leak a status the same way. The cleanup trap now normalizes any
+  unexpected status to `1`, or `2` when the VM was deliberately kept, while
+  preserving the deliberate signal codes `130`/`143`. Verified across raw
+  statuses 0/1/2/5/77/130/143, and SIGINT/SIGTERM behavior confirmed unchanged
+  from before the edit.
+- **`qm importdisk` is now guarded** with an error that names the likely cause
+  rather than leaving the operator with a raw LVM message: it points at
+  `pvesm status --content images` and `lvs -o ...,data_percent,metadata_percent`
+  and suggests `--storage <id>`.
+
+### Added
+
+- **Free-space advisory before the download.** The script already checked that
+  the target storage is active and images-capable, with a comment explaining
+  that the point was to avoid failing "at qm importdisk, AFTER the download and
+  VM creation" — but it never checked free space, which is exactly how the run
+  above burned a ~600 MB download plus a VM create/destroy cycle before
+  failing. It now reads the `Available` column (already documented in a comment
+  at the top of that section, previously unused) and warns when the storage
+  reports under ~10 G, adding an `lvs` hint under 4 G.
+
+  Deliberately **warn-only, and fail-soft**: thin pools are overprovisioned by
+  design, so a low "available" figure is not reliably fatal, and an unparseable
+  row skips the advisory rather than blocking a run that would have worked.
+  Same posture as `get_latest_lts()`. Verified against realistic `pvesm status`
+  output for a full pool, a healthy pool, an inactive row, and a missing
+  storage.
+- Troubleshooting entry for `Cannot create new thin volume` /
+  `thin pool ... reached threshold`, including the metadata-exhaustion variant
+  that fails the same way while data space still looks fine.
+- Exit-code table now documents `130`/`143` and states the normalization
+  guarantee. Requirements table now lists the ~10 G free-space expectation.
+
+### Notes
+
+- Ubuntu LTS auto-detection resolved to `resolute` and its cloud image
+  downloaded and verified normally, so the pre-release-codename risk documented
+  under Known Limitations did not materialize on this run.
+- The KiB unit assumption for `pvesm status` columns could not be verified
+  without a Proxmox host. Because the check is warn-only, a wrong assumption
+  would produce a spurious warning rather than a blocked run; the next hardware
+  run will confirm it.
+
 ## [1.3.0] - 2026-09-05
 
 Compatibility pass against OpenClaw 2026.9.1 (this repo was built against
@@ -281,6 +337,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.3.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.1.0...v1.2.0
