@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.4.2
+# Version: v1.4.3
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.4.2"
+SCRIPT_VERSION="v1.4.3"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -311,8 +311,8 @@ HOST_AVAIL_MB="$(awk '/^MemAvailable:/{print int($2/1024); exit}' /proc/meminfo 
 if [[ "$HOST_AVAIL_MB" =~ ^[0-9]+$ ]] && (( HOST_AVAIL_MB > 0 )); then
   if (( MEMORY_MB > HOST_AVAIL_MB )); then
     WARN "--memory ${MEMORY_MB} MB exceeds this node's ${HOST_AVAIL_MB} MB currently available."
-    WARN "The VM may fail to start, or push the node into swap. Lower --memory,"
-    WARN "or free memory on the node first."
+    WARN "The VM may fail to start or push the node into swap — lower --memory,"
+    WARN "or free memory first."
   fi
 else
   DEBUG "Could not read MemAvailable; skipping the host memory advisory."
@@ -329,10 +329,10 @@ if [[ "$TMP_AVAIL_KB" =~ ^[0-9]+$ ]] && (( TMP_AVAIL_KB > 0 )); then
   # Cloud images run ~600-800 MB; 2G leaves room for the download plus the
   # qemu-img check that follows it.
   if (( TMP_AVAIL_KB < 2097152 )); then
-    WARN "${IMG_STAGE_DIR} has only $(( TMP_AVAIL_KB / 1024 )) MB free on this node."
-    WARN "The Ubuntu cloud image (~700 MB) is staged there before import."
-    WARN "If it runs out mid-download the error reads as a failed download, not"
-    WARN "a full disk. Free space, or re-run with TMPDIR=/path/to/roomier."
+    WARN "${IMG_STAGE_DIR} has only $(( TMP_AVAIL_KB / 1024 )) MB free; the cloud"
+    WARN "image (~700 MB) is staged there before import. If it fills mid-download"
+    WARN "the error looks like a network failure, not a full disk."
+    WARN "Free space, or re-run with TMPDIR=/path/to/roomier."
   fi
 else
   DEBUG "Could not read free space for ${IMG_STAGE_DIR}; skipping the advisory."
@@ -537,19 +537,25 @@ if [[ "$STORAGE_ID" == "auto" || -z "$STORAGE_ID" ]]; then
         while read -r _sname _skib; do
           [[ -n "$_sname" ]] || continue
           _n=$(( _n + 1 ))
-          printf '  %d) %-20s %sG available\n' "$_n" "$_sname" "$(( _skib / 1024 / 1024 ))"
+          # Right-align the size so the numbers form a readable column: this is
+          # the one screen where the operator is comparing values to decide.
+          printf '  %d) %-20s %6sG available\n' \
+            "$_n" "$_sname" "$(( _skib / 1024 / 1024 ))"
         done <<< "$_alts"
-        echo "  0) keep ${STORAGE} (${_cur_g}G) anyway"
+        printf '  0) %-20s %6sG (keep the original)\n' "$STORAGE" "$_cur_g"
         echo
-        echo "Choose 1-${_n}, or press Enter to keep '${STORAGE}':"
-        # Never let a stray/absent answer pick a storage for you: anything not
-        # matching a listed number keeps the original choice.
+        echo "Choose 0-${_n}, or press Enter to keep '${STORAGE}':"
+        # 0 is accepted explicitly rather than relying on the catch-all below,
+        # so the menu does not advertise an option the prompt ignores.
+        # Anything else — blank, out of range, non-numeric, EOF — also keeps the
+        # original: a stray keystroke must never relocate a VM.
         if read -r _reply && [[ "$_reply" =~ ^[0-9]+$ ]] && \
            (( _reply >= 1 && _reply <= _n )); then
           STORAGE="$(printf '%s\n' "$_alts" | awk -v i="$_reply" 'NR==i{print $1}')"
           OK "Using storage: ${STORAGE}"
         else
-          WARN "Keeping '${STORAGE}'. If import fails, re-run with --storage <id>."
+          WARN "Keeping '${STORAGE}'. If the import fails for space, re-run with"
+          WARN "--storage <id> to choose a different one."
         fi
       else
         # Nobody to ask. Switch to the roomiest storage that fits, and say so
@@ -559,7 +565,8 @@ if [[ "$STORAGE_ID" == "auto" || -z "$STORAGE_ID" ]]; then
         _best_g="$(printf '%s\n' "$_alts" | awk 'NR==1{print int($2/1024/1024)}')"
         if [[ -n "$_best" ]]; then
           WARN "No terminal attached; auto-switching to '${_best}' (${_best_g}G available)."
-          WARN "Pass --storage ${STORAGE} to override this and use it anyway."
+          WARN "To force the original despite the space warning, re-run with"
+          WARN "  --storage ${STORAGE}"
           STORAGE="$_best"
         fi
       fi
@@ -605,16 +612,13 @@ if [[ "$STORAGE_AVAIL_KIB" =~ ^[0-9]+$ ]] && [[ "$STORAGE_AVAIL_KIB" -gt 0 ]]; t
   # ~5G is the measured floor for image + apt + Node + OpenClaw; 10G leaves room
   # for the npm cache and logs before the assistant stores anything.
   if [[ "$STORAGE_AVAIL_G" -lt 10 ]]; then
-    WARN "Storage '${STORAGE}' reports only ${STORAGE_AVAIL_G}G available."
-    WARN "Provisioning writes roughly 5G (image + apt + Node + OpenClaw) and"
-    WARN "wants ~10G of headroom. This run may fail at disk import or part-way"
-    WARN "through the guest install."
-    WARN "Check:  pvesm status --content images"
+    WARN "Storage '${STORAGE}' reports only ${STORAGE_AVAIL_G}G available;"
+    WARN "provisioning writes ~5G and wants ~${REC_STORAGE_FREE_G}G of headroom."
+    WARN "Free space, or re-run with --storage <id>. To see what is using it:"
+    WARN "  pvesm status --content images"
     if [[ "$STORAGE_AVAIL_G" -lt 4 ]]; then
-      WARN "For LVM-thin also check the pool's data usage:"
-      WARN "  lvs -o lv_name,lv_size,data_percent,metadata_percent"
+      WARN "  lvs -o lv_name,lv_size,data_percent,metadata_percent   # LVM-thin"
     fi
-    WARN "Free space, or pick another storage with --storage <id>."
   else
     DEBUG "Storage ${STORAGE} available: ${STORAGE_AVAIL_G}G"
   fi
@@ -1380,7 +1384,7 @@ echo " Log file      : ${LOG_FILE}"
 if [[ "$INSTALL_OK" -eq 1 ]]; then
   echo " Provisioning  : ${GREEN}OK${RESET} (${INSTALL_STATUS})"
 elif [[ -n "$INSTALL_STATUS" ]]; then
-  echo " Provisioning  : ${RED}FAILED${RESET} (${INSTALL_STATUS})"
+  echo " Provisioning  : ${RED}FAILED${RESET} (got as far as: ${INSTALL_STATUS})"
 else
   echo " Provisioning  : ${YELLOW}UNCONFIRMED${RESET} (may still be running)"
 fi
@@ -1389,16 +1393,23 @@ echo "=================================================="
 echo
 
 if [[ "$INSTALL_OK" -ne 1 ]]; then
-  echo "Provisioning is not confirmed OK. The VM was left running for inspection:"
+  echo "${YELLOW}Provisioning was not confirmed.${RESET} The VM is left running so you can"
+  echo "look at it. Start here:"
   echo "  qm guest exec ${VM_ID} -- tail -n 30 /var/log/openclaw-provision.log"
   echo "  qm guest exec ${VM_ID} -- cloud-init status --long"
+  echo "  qm guest exec ${VM_ID} -- cat /var/log/openclaw-install.fail"
   echo
-  echo "The steps below assume provisioning eventually succeeds."
+  echo "Cloud-init may still be running — on a slow node it can finish minutes"
+  echo "after this script gives up. Re-check the first command before assuming"
+  echo "it failed."
   echo
+  echo "${YELLOW}The steps below are the normal next actions, and apply only once${RESET}"
+  echo "${YELLOW}provisioning has actually succeeded.${RESET} Confirm that first:"
+  echo "  qm guest exec ${VM_ID} -- cat /var/log/openclaw-install.ok"
+else
+  echo "Node and OpenClaw are installed; onboarding is NOT done yet — finish it"
+  echo "over SSH so no credentials ever touch this host's logs."
 fi
-
-echo "Node and OpenClaw are installed; onboarding is NOT done yet — finish it"
-echo "over SSH so no API key ever touches this host's logs."
 echo
 echo "  1) Connect. First login forces a password change — have the console"
 echo "     password from the summary above ready (PAM asks for it as the"

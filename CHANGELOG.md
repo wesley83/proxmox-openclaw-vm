@@ -5,6 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.4.3] - 2026-09-05
+
+Copy review of everything the script prints, including the conditional paths no
+run had exercised. Text only — no behavior change beyond accepting `0` at the
+storage prompt.
+
+### Fixed
+
+- **Storage picker column was ragged.** Sizes were left-aligned against a
+  padded name, so `5493G` and `79G` did not line up. Right-aligned now — this
+  is the one screen where the operator compares numbers to make a choice.
+- **The picker listed `0) keep ...` but the prompt said "Choose 1-N".** `0`
+  worked only by falling through the catch-all. It is now accepted explicitly
+  and the prompt reads `Choose 0-N`, so the menu no longer advertises an option
+  it does not name. Re-verified that `0`, blank, out-of-range, non-numeric and
+  EOF all still keep the original storage.
+- **Ambiguous override hint.** After auto-switching away from a full storage,
+  "Pass --storage <original> to override this" could be read as overriding the
+  *new* choice. Now: "To force the original despite the space warning, re-run
+  with --storage <original>".
+- **Failure paths asserted too much.** Both the FAILED and UNCONFIRMED variants
+  printed "Node and OpenClaw are installed" — untrue when the install failed —
+  followed by four confident steps. The failure branch now says provisioning
+  was not confirmed, notes that cloud-init may still be finishing on a slow
+  node, adds the `.fail` log to the diagnostics, and states plainly that the
+  steps apply only once provisioning has actually succeeded, with the command
+  to confirm it.
+- **`FAILED (node=v26.8.1 openclaw=unknown)` read like a contradiction.** Now
+  `FAILED (got as far as: ...)`, which is what the partial versions mean.
+- **Advisories were front-loaded with explanation.** The storage advisory ran
+  seven `[WARN]` lines before the actionable one; the remedy now appears on
+  line three. The memory and staging advisories were tightened the same way.
+- **Stale cross-reference.** The storage advisory told operators to "pick
+  another storage with --storage <id>" — written before v1.4.0 made the script
+  offer that choice itself.
+- **"so no API key ever touches this host's logs"** became "no credentials",
+  since v1.4.2 documents subscription sign-in as an alternative to API keys.
+- Removed a duplicate blank line between the header and step 1.
+
 ## [1.4.2] - 2026-09-05
 
 Re-verified the post-provision instructions against **2026.9.2** — the version
@@ -491,6 +530,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.4.3]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.2...v1.4.3
 [1.4.2]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.2...v1.4.0
