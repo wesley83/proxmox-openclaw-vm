@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.4.3
+# Version: v1.4.4
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.4.3"
+SCRIPT_VERSION="v1.4.4"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -1407,14 +1407,21 @@ if [[ "$INSTALL_OK" -ne 1 ]]; then
   echo "${YELLOW}provisioning has actually succeeded.${RESET} Confirm that first:"
   echo "  qm guest exec ${VM_ID} -- cat /var/log/openclaw-install.ok"
 else
-  echo "Node and OpenClaw are installed; onboarding is NOT done yet — finish it"
-  echo "over SSH so no credentials ever touch this host's logs."
+  echo "Node and OpenClaw are installed; onboarding is NOT done yet — finish"
+  echo "it on the VM so no credentials ever touch this host's logs."
 fi
 echo
-echo "  1) Connect. First login forces a password change — have the console"
-echo "     password from the summary above ready (PAM asks for it as the"
-echo "     'current' password even over SSH key auth):"
+echo "  1) Log in. First login forces a password change — the console"
+echo "     password above is what PAM asks for as the 'current' one."
+echo "     Two ways in, both fine:"
 echo "       ssh ${SSH_TARGET}"
+echo "       Proxmox GUI -> VM ${VM_ID} -> Console"
+echo
+echo "     SSH needs your key ON the VM, and only the Proxmox node's key"
+echo "     was installed — from any other machine it fails with 'Permission"
+echo "     denied (publickey)'. Password SSH is disabled, so there is no"
+echo "     password prompt to fall back to. The console needs no key at all"
+echo "     and always works; steps 2 and 3 are identical either way."
 echo
 echo "  2) Run onboarding with the pre-generated gateway token. The wizard"
 echo "     will ask how to authenticate — paste an API key, or sign in to"
@@ -1441,10 +1448,16 @@ echo
 echo "  4) Open the Control UI — NOT http://<vm-ip>:18789, which can never"
 echo "     work. The UI mints a browser device identity (WebCrypto), which"
 echo "     needs a secure context: HTTPS or localhost. Plain HTTP to a LAN IP"
-echo "     is refused however correct your token is. Tunnel it from the"
-echo "     machine whose browser you'll use (its key must be authorized here):"
+echo "     is refused however correct your token is."
+echo "     Run the tunnel ON THE MACHINE WHOSE BROWSER YOU WILL USE - not"
+echo "     here, and not in the Proxmox console. It needs that machine's"
+echo "     SSH key on the VM:"
 echo "       ssh -N -L 18789:127.0.0.1:18789 ${SSH_TARGET}"
 echo "     Leave that running, then browse to http://localhost:18789/"
+echo "     If that machine's key is not on the VM yet, add it from a shell"
+echo "     here (the console works fine for this):"
+echo "       mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+echo "       echo '<paste-your-public-key>' >> ~/.ssh/authorized_keys"
 echo "     'openclaw dashboard --no-open' prints the URL with the token in it."
 echo "     (Tailscale Serve, Cloudflare Tunnel, nginx+TLS: README step 4.)"
 echo

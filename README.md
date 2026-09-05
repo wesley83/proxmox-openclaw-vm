@@ -2,7 +2,7 @@
 ### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
 Created by **Wesley Faulkner**
 
-**Current release: [v1.4.3](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.3)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Current release: [v1.4.4](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.4)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
 
@@ -193,15 +193,30 @@ Nothing here downloads a browser. `openclaw` depends on `playwright-core`, which
 
 The script installs OpenClaw but does **not** onboard it. Finish over SSH:
 
-### 1. Connect
+### 1. Log in
+
+Two routes. Both land you at the same shell, and steps 2–3 are identical either way.
+
+**A — SSH**, from a machine whose key is on the VM:
 
 ```bash
 ssh <user>@<vm-ip>
 ```
 
-> **Run this from the Proxmox node, not your desktop** — the embedded key is `/root/.ssh/id_ed25519.pub` (or `id_rsa.pub`) **on the node**, so only the node's own key is authorized. Connecting from elsewhere fails with `Permission denied (publickey)` before any password prompt even appears. To connect directly from your own machine going forward, add its public key to `~/.ssh/authorized_keys` on the VM (or re-run with `--ssh-key` pointing at a file containing both keys, one per line — multiple keys are supported), once you're in via the node.
+> **That means the Proxmox node, not your desktop** — the embedded key is `/root/.ssh/id_ed25519.pub` (or `id_rsa.pub`) **on the node**, so only the node's own key is authorized. From anywhere else this fails with `Permission denied (publickey)` before any password prompt appears. **Password SSH is disabled** on Ubuntu cloud images and this script doesn't enable it, so there is no password fallback — the key is the only way in over SSH.
 
-> **First login forces a password change.** Have the console password from the summary ready — PAM asks for it as the "current" password even with SSH key auth.
+**B — The Proxmox console**, which needs no key at all: **Datacenter → your node → the VM → Console**. Log in with the username and the random console password from the summary. This always works, including from a machine that has never touched the VM, so it's the reliable option if SSH refuses you.
+
+> **First login forces a password change** on either route. The console password from the summary is what PAM asks for as the "current" password — even over SSH key auth.
+
+**To use SSH from your own machine afterwards**, append its public key from a shell on the VM (the console is fine for this):
+
+```bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+echo '<paste your public key>' >> ~/.ssh/authorized_keys
+```
+
+You'll want this before step 4 regardless: the Control UI tunnel runs on the machine with the browser, and it needs that machine's key here. Alternatively, re-run the script with `--ssh-key` pointing at a file containing both keys, one per line.
 
 ### 2. Onboard
 
@@ -296,7 +311,7 @@ The three numbered hints in that box are generic and won't fix this specific cas
 
 #### Option A — SSH tunnel (zero extra software; start here)
 
-From the machine whose browser you'll use (requires your key in the VM's `authorized_keys` — see step 1):
+**Run this on the machine whose browser you'll use** — not on the VM, and not in the Proxmox console. It needs that machine's key in the VM's `authorized_keys` (see step 1 if you logged in via the console and haven't added it yet):
 
 ```bash
 ssh -N -L 18789:127.0.0.1:18789 <user>@<vm-ip>
@@ -498,7 +513,14 @@ The `reason=` field in the `closed before connect` line is the ground truth. A `
 ### ❗ "Permission denied (publickey)" when connecting to the VM
 You're almost certainly connecting from the wrong machine. The embedded SSH key is auto-detected from **the Proxmox node** (`/root/.ssh/id_ed25519.pub` or `id_rsa.pub`), not from wherever you're typing the `ssh` command. This fails at the handshake, before any password prompt — it's unrelated to the password-expiry issues below.
 
-Fix: SSH in **from the Proxmox node itself** first (its key is the one that was embedded), then append your own workstation's public key to `~/.ssh/authorized_keys` on the VM so you can connect directly next time. Or pass `--ssh-key` at creation time pointing at a file with both keys (one per line).
+There is no password fallback: Ubuntu cloud images disable `PasswordAuthentication` and this script doesn't enable it, so SSH is key-only.
+
+Two fixes, both fine:
+
+- **Use the Proxmox console instead** — **Datacenter → node → VM → Console** — and log in with the username and console password from the summary. This needs no key and works from anywhere.
+- **SSH from the Proxmox node itself**, whose key is the one that was embedded.
+
+Either way, once you have a shell, append your own workstation's public key to `~/.ssh/authorized_keys` on the VM so you can connect directly next time. Or pass `--ssh-key` at creation time pointing at a file with both keys (one per line).
 
 ### ❗ "--disk 512M is not larger than the cloud image's virtual size"
 `qm resize` treats a bare size as absolute and cannot shrink. Use something larger than ~3.5 GiB — `40G` is the default for a reason.

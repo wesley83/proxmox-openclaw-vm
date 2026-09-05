@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.4.4] - 2026-09-05
+
+The instructions assumed SSH was the only way in. It isn't, and for many first
+runs it isn't even available.
+
+### Fixed
+
+- **The Proxmox console was never mentioned as a login route.** The script
+  installs only the *Proxmox node's* SSH key, and Ubuntu cloud images ship with
+  `PasswordAuthentication no` (this script doesn't enable it), so SSH from any
+  other machine fails `Permission denied (publickey)` with no password fallback
+  — observed on a real run. The console needs no key, works from anywhere, and
+  accepts the random console password the summary already prints. It is now
+  offered alongside SSH in step 1 and in README step 1, with the key-only
+  constraint stated plainly.
+- **Step 4 was ambiguous about where the tunnel runs**, which breaks entirely
+  for a console user. "Tunnel it from the machine whose browser you'll use" now
+  reads "Run the tunnel ON THE MACHINE WHOSE BROWSER YOU WILL USE — not here,
+  and not in the Proxmox console", and the step now shows how to append a
+  public key to `~/.ssh/authorized_keys` from the VM, since a console-only
+  operator has no working tunnel until they do.
+- **Header said "finish it over SSH"**, contradicting the console route; now
+  "finish it on the VM".
+- The `Permission denied (publickey)` troubleshooting entry now leads with the
+  console as a fix, rather than assuming access to the Proxmox node's shell.
+
+### Notes
+
+Steps 2 and 3 are genuinely identical on either route — both run entirely on
+the VM. Only step 4 differs, because the tunnel is the one command that must
+run somewhere else.
+
 ## [1.4.3] - 2026-09-05
 
 Copy review of everything the script prints, including the conditional paths no
@@ -530,6 +562,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.4.4]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.3...v1.4.4
 [1.4.3]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.2...v1.4.3
 [1.4.2]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.0...v1.4.1
