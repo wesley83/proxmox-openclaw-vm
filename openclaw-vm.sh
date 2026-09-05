@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.4.0
+# Version: v1.4.1
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.4.0"
+SCRIPT_VERSION="v1.4.1"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -1107,7 +1107,14 @@ write_files:
       command -v openclaw >/dev/null 2>&1 || fail "openclaw is not on PATH after npm install"
       # timeout, not just || : a command that HANGS under cloud-init (no TTY)
       # would wedge provisioning forever with no status file ever written.
-      OPENCLAW_VER="$(timeout 60 openclaw --version 2>/dev/null || echo unknown)"
+      # `openclaw --version` prints "OpenClaw <ver> (<hash>)". Strip the leading
+      # product name so the status file reads "openclaw=2026.9.2 (3928bad)"
+      # rather than "openclaw=OpenClaw 2026.9.2 (3928bad)", which the host then
+      # prints back inside its own parentheses. The sed is a no-op if upstream
+      # ever changes the format, so an unexpected string still passes through.
+      OPENCLAW_VER="$(timeout 60 openclaw --version 2>/dev/null \
+        | sed 's/^OpenClaw[[:space:]]*//' || echo unknown)"
+      [ -n "$OPENCLAW_VER" ] || OPENCLAW_VER=unknown
       echo "[*] OpenClaw installed: ${OPENCLAW_VER}"
 
       # The gateway runs as a systemd USER service. Without lingering it does

@@ -2,7 +2,7 @@
 ### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
 Created by **Wesley Faulkner**
 
-**Current release: [v1.4.0](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.0)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Current release: [v1.4.1](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.1)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
 
@@ -34,7 +34,7 @@ Created by **Wesley Faulkner**
 
 **Run end to end on real Proxmox VE hardware (PVE 7), including onboarding.** In July 2026, against `openclaw 2026.7.1-2`, a full run on a `local-lvm` + directory-snippet-storage node completed: disk import/resize on thin-LVM, cloud-init, Node v26.5.1, gateway token generated, provisioning confirmed via QEMU Guest Agent — exit 0. Onboarding was then completed interactively (LLM provider, messaging channel, web search), the gateway daemon was enabled and started as a systemd user service, and the Control UI was reached successfully through an SSH tunnel. Everything in [After the Script Finishes](#-after-the-script-finishes) is written from that run, including the Control UI secure-context problem in step 4 — which is documented here because it was hit for real, not anticipated.
 
-**What v1.3.0 changed has *not* been re-run on hardware.** The `--openclaw-version` flag and the rewritten post-install instructions were verified against a live OpenClaw 2026.9.1 install, by generating the cloud-init user-data and validating it against cloud-init 26.1's own schema checker, and by host-side dry runs of the argument parsing and the guest script's argument plumbing. That is real evidence, but it is weaker than a provisioning run — see [Known Limitations](#-known-limitations).
+**Re-confirmed on hardware at v1.4.0** (September 2026, same PVE 7 node). A clean run provisioned Node v26.8.1 and OpenClaw 2026.9.2 end to end — disk import and resize on thin-LVM, snippet storage on a *different* storage than the VM disk, cloud-init, DHCP IP detection, and QGA-confirmed provisioning — exit 0. That covers everything added since v1.2.1: the `--openclaw-version` plumbing, the rewritten post-install instructions, the exit-code normalization, and the new preflight advisories. Onboarding itself has not been re-run since July.
 
 ---
 
@@ -570,7 +570,9 @@ chmod 600 /var/log/openclaw-vm-*.log /var/lib/vz/snippets/openclaw-*.yaml
 ## ⚠️ Known Limitations
 
 ### 🧪 What has and hasn't been run on hardware
-The full provisioning path — `qm`/QGA plumbing, thin-LVM import/resize, cloud-init, Node + OpenClaw install — was run end to end on a real PVE 7 node in July 2026 (see Status). What has **not** been re-run on hardware since is v1.3.0's changes: the `--openclaw-version` flag and the rewritten post-install instructions. Those were verified against a live OpenClaw 2026.9.1 install and by host-side dry runs of the argument parsing and the guest script's argument plumbing, which is weaker evidence than a real provisioning run.
+The full provisioning path — `qm`/QGA plumbing, thin-LVM import/resize, cloud-init, Node + OpenClaw install — has been run end to end on a real PVE 7 node twice: July 2026 (v1.1.0, through onboarding) and September 2026 (v1.4.0, provisioning only). See [Status](#-status).
+
+Two things remain unexercised on hardware. **The interactive storage picker** added in v1.4.0 has not fired on a real node — the run that would have triggered it had enough free space, so the prompt path is verified only by unit-style testing of its input handling. And **onboarding** (`openclaw onboard`) has not been repeated since July, against a much older OpenClaw.
 
 ### 🖥️ amd64 only
 The cloud image URL is hard-coded to `amd64`. Edit `-server-cloudimg-amd64.img` → `-arm64.img` for ARM hosts.

@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.4.1] - 2026-09-05
+
+A clean v1.4.0 run on real hardware (PVE 7, same node as the v1.3.0 failure)
+provisioned Node v26.8.1 and OpenClaw 2026.9.2 end to end and exited 0. Disk
+import and resize on thin-LVM, snippet storage on a *different* storage than
+the VM disk, cloud-init, DHCP IP detection, and QGA-confirmed provisioning all
+worked. This entry records that, and fixes the one cosmetic flaw the run
+exposed.
+
+### Fixed
+
+- **Doubled product name in the status line.** `openclaw --version` prints
+  `OpenClaw <ver> (<hash>)`, and that whole string was stored verbatim, so the
+  summary rendered `Provisioning : OK (node=v26.8.1 openclaw=OpenClaw 2026.9.2
+  (3928bad))` — "openclaw=OpenClaw", with the hash's parentheses nested inside
+  the host's own. The leading product name is now stripped, giving
+  `openclaw=2026.9.2 (3928bad)`. The strip is a no-op if upstream changes the
+  format, so an unexpected string still passes through intact rather than being
+  mangled or blanked.
+
+### Changed
+
+- Status and Known Limitations now record the v1.4.0 hardware run, replacing
+  the "not re-run on hardware" caveat that had been accurate until this run.
+
+### Still unverified on hardware
+
+- **The interactive storage picker** added in v1.4.0 never fired: the node had
+  enough free space by then, so auto-selection took the quiet path. Its input
+  handling is unit-tested but the prompt has not been seen on a real terminal.
+- **The free-space advisory** also did not fire, which does not prove it works.
+  `pvesm status` column units are assumed to be KiB; if they are actually bytes,
+  the check computes a figure ~1024x too large and would silently never warn.
+  Silence is consistent with both "storage has room" and "check is inert", and
+  this run cannot distinguish them.
+- **Onboarding** has not been repeated since July 2026, against a much older
+  OpenClaw.
+
 ## [1.4.0] - 2026-09-05
 
 Storage selection was capacity-blind: it preferred `local-lvm` whenever that
@@ -420,6 +458,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.4.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.3.0...v1.3.1
