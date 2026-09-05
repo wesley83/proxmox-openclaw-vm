@@ -137,10 +137,10 @@ Measured footprint, so you can size deliberately rather than guess:
 | Component | Disk |
 |---|---|
 | Ubuntu cloud image, booted | ~2.2 G |
-| apt packages, all 10 incl. `build-essential` + `cmake` toolchain (**measured**) | 645 M |
-| Node.js (NodeSource) + OpenClaw incl. its 56 dependency trees and npm cache (**measured**) | 778 M |
-| **Measured total on top of the base image** | **~1.4 G (≈3.6 G with the booted base)** |
-| **With headroom for logs, state, and updates** | **~5 G is the planning number** |
+| apt packages, all 10 incl. `build-essential` + `cmake` toolchain (**measured**, unchanged as of OpenClaw 2026.9.1) | 645 M |
+| OpenClaw's own installed package alone (**measured** on 2026.9.1 — its npm tarball nearly doubled since the 645/778 M split below was first measured against 2026.7.1-2) | 520 M |
+| Node.js (NodeSource) + OpenClaw incl. dependency trees and npm cache (**measured on 2026.7.1-2**; now understated given the line above — treat as a floor, not current) | 778 M |
+| **With headroom for logs, state, and updates** | **~5 G is still a comfortable planning number** — the `20G`+ recommendation absorbs this growth easily |
 
 Hence the `8G` hard floor and `20G` warning. The `40G` default leaves room for logs, state, conversation history, and a browser later.
 
@@ -176,6 +176,8 @@ openclaw onboard --install-daemon --gateway-token "$(cat ~/.openclaw/gateway-tok
 
 This one command runs an interactive wizard with several prompts. Expect, roughly in this order:
 
+> Screenshots below are from OpenClaw **2026.7.1-2**. We have **not** re-verified this interactive flow against the current release (2026.9.1) — our re-check used `--non-interactive` with every prompt skipped, to isolate a specific config question, so it deliberately bypassed this entire sequence. That release did add `--tui`/`--classic`/`--modern`/`--skip-ui` flags, which suggests the onboarding UI has changed since these were captured — treat the screenshots as illustrative of the shape, not a guarantee of the exact wording or flow on your version.
+
 **a. A security disclaimer** you must accept before anything else happens:
 
 ![OpenClaw onboarding security disclaimer — a TUI prompt summarizing the personal-agent trust model and recommended security baseline, ending with "Continue?" and Yes/No options, Yes selected by default](img/onboarding-security-disclaimer.png)
@@ -204,7 +206,9 @@ This step is cosmetic, not structural — per OpenClaw's docs, your provider, ch
 
 Either way, you end up back at a shell prompt, ready for step 3.
 
-> **About the token — verified live, this matters:** the script pre-generates `~/.openclaw/gateway-token`, and the command above passes it via `--gateway-token`. But the default *guided* onboarding flow **silently ignores explicit gateway flags** (`docs.openclaw.ai/cli/onboard` scopes them to `--flow quickstart` / `--flow manual` only) — confirmed on a real run, where `gateway.auth.token` in `openclaw.json` did **not** match the file afterward. Onboarding mints its own random token you can't read back (`config get` redacts secrets). Step 3 fixes this in one line by making the file's token authoritative. The same applies to `--gateway-bind`: the gateway always installs bound to `loopback` regardless of what you pass (`gateway install` has no `--bind` flag at all — its systemd unit only ever carries `--port`).
+> **About the token:** on OpenClaw **2026.7.1-2**, we confirmed live that the default onboarding flow **silently ignored** `--gateway-token` and `--gateway-bind` — `gateway.auth.token` in `openclaw.json` didn't match the file afterward, no matter what was passed. As of **2026.9.1**, we re-verified directly (non-interactive test run, both flags, root and non-root users) and both are now correctly applied — `gateway.auth.token` matched exactly, and `gateway.bind` took the requested value. If you're running an OpenClaw version between these where the old behavior might still apply, or just want a belt-and-suspenders check, **step 3 below verifies and fixes this in one line regardless of which behavior you get** — it's safe and idempotent either way. Newer versions also added `openclaw gateway auth-token --show`, which reveals the current token directly from an interactive terminal — handy for confirming which credential is actually live without our workaround at all.
+>
+> We still don't recommend passing `--gateway-bind` here even though it now works: step 4 keeps the gateway on `loopback` regardless, since that's what the Control UI's secure-context requirement needs — see below.
 
 ### 3. Start the gateway
 
@@ -224,7 +228,7 @@ What each line does, and why it matters:
 
 - **`openclaw gateway status`** — a read-only check: confirms the systemd unit is actually active, and does a connectivity/auth probe against the gateway's WebSocket port to verify your token is recognized. This is what tells you the previous line actually worked, before you go looking for the Control UI in a browser and wonder why it won't load.
 
-**Then make your known token authoritative.** Onboarding minted a random token you can't read back (see the note in step 2); one line replaces it with the token the provisioning script generated, so `~/.openclaw/gateway-token` is the real credential from here on:
+**Then confirm your known token is the one actually configured** (see the note in step 2 — this matters on some OpenClaw versions, not others, so just always run it):
 
 ```bash
 openclaw config set gateway.auth.token "$(cat ~/.openclaw/gateway-token)"

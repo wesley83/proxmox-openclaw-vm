@@ -5,6 +5,65 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [Unreleased]
+
+Compatibility review against OpenClaw 2026.9.1 (previously verified against
+2026.7.1-2). `openclaw-vm.sh` required **no functional changes** — Node
+version requirements, NodeSource majors, the apt package list, and the
+`cmake` native-module rationale are all still current, reconfirmed live in
+an Ubuntu 26.04 WSL environment. All changes are corrections/additions to
+the README's post-install guidance.
+
+### Fixed
+
+- **The `--gateway-bind`/`--gateway-token` onboarding bug is resolved
+  upstream.** Confirmed broken live in 2026.7.1-2 (silently ignored by the
+  default onboarding flow); re-tested directly against 2026.9.1
+  (non-interactive run, both flags, root and non-root users) and both are
+  now correctly applied to `openclaw.json`. The README's step 2 callout and
+  step 3 token-sync step are reworded from an unconditional "this is always
+  broken" claim to a version-aware, defensive "verify and fix either way"
+  framing — the sync command is harmless and idempotent regardless of which
+  behavior your OpenClaw version has.
+- **Resource-sizing table numbers were stale.** OpenClaw's own npm package
+  nearly doubled in unpacked size since 2026.7.1-2 (measured: 520 M for the
+  installed package alone on 2026.9.1, vs. a 778 M *combined* Node+OpenClaw
+  figure from 2026.7.1-2). The table now labels each figure with the
+  OpenClaw version it was measured against, rather than presenting a
+  now-understated number as current.
+
+### Added
+
+- Documented `openclaw gateway auth-token --show` (new since 2026.7.1-2) —
+  reveals the actual configured Gateway token from an interactive terminal,
+  which didn't exist when the token-sync workaround was first written.
+
+### Verified unchanged
+
+- The Control UI secure-context requirement (`control ui requires device
+  identity (use HTTPS or localhost secure context)`) — same string,
+  confirmed still present in the 2026.9.1 dist bundle. Options A–D in step
+  4 remain necessary and correct.
+- The gateway log path format for non-root users
+  (`/tmp/openclaw-<uid>/openclaw-<date>.log`, used in Troubleshooting) —
+  reconfirmed against a non-root test user; a root-only path quirk
+  (`/tmp/openclaw/...`, no uid suffix) briefly looked like a regression but
+  doesn't apply to the non-root `openclaw` user this script creates.
+- `koffi` is a new native dependency since 2026.7.1-2, but ships the same
+  per-platform-prebuild-with-source-fallback pattern as the existing native
+  deps (`@lydell/node-pty`, `sqlite-vec`) — no new package needed beyond the
+  `cmake` this script already installs.
+
+### Not verified — flagged, not fixed
+
+- The interactive onboarding flow's exact prompts/wording (screenshots in
+  step 2) were **not** re-checked against 2026.9.1. Our re-verification
+  used `--non-interactive` with every prompt skipped, specifically to
+  isolate the config-flag question above, so it bypassed the entire
+  interactive sequence. 2026.9.1 added `--tui`/`--classic`/`--modern`/
+  `--skip-ui` flags, suggesting the onboarding UI has changed since the
+  screenshots were captured. README now discloses this explicitly.
+
 ## [1.2.1] - 2026-07-29
 
 ### Added
