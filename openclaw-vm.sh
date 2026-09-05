@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.2.1
+# Version: v1.3.0
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.2.1"
+SCRIPT_VERSION="v1.3.0"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -83,9 +83,10 @@ DISK_SIZE="40G"
 SWAP_SIZE="2G"            # Ubuntu cloud images ship with NO swap; "0" disables
 
 # Floors are hard failures; the "comfortable" values only warn. Sized from
-# measured footprint: base rootfs ~2.2G, apt adds ~700M (build-essential's
+# measured footprint: base rootfs ~2.2G, apt adds ~645M (build-essential's
 # toolchain ~400M, cmake+cmake-data ~75M, git 25M), NodeSource nodejs ~120M,
-# openclaw unpacked 83.4 MiB across 8550 files plus 56 dependency trees, and
+# openclaw's own installed package ~520M as of 2026.9.1 (it roughly doubled
+# from 2026.7.1-2 — this number drifts upward, so treat it as a floor), and
 # npm/apt caches on top — roughly 5G before the assistant stores anything.
 MIN_MEMORY_MB=2048
 REC_MEMORY_MB=4096
@@ -94,6 +95,7 @@ REC_DISK_G=20
 UBUNTU_CODENAME="noble"   # Fallback if LTS auto-detection fails
 VM_USER="openclaw"
 NODE_MAJOR=26             # OpenClaw docs recommend Node 26
+OPENCLAW_VERSION="latest" # npm version or dist-tag; pin with --openclaw-version
 SSH_KEY_PATH="auto"       # auto-detect /root/.ssh/id_ed25519.pub or id_rsa.pub
 STORAGE_ID="auto"         # VM disk storage; set via --storage
 SNIPPET_STORAGE_ID="auto"
@@ -157,6 +159,10 @@ Options:
                           falls back to noble)
   -n, --node <major>      Node.js major version (default ${NODE_MAJOR};
                           supported: ${SUPPORTED_NODE_MAJORS})
+  --openclaw-version <v>  OpenClaw npm version or dist-tag (default
+                          ${OPENCLAW_VERSION}; e.g. 2026.9.1, next). Pin it for
+                          reproducible builds. Not checked against the registry
+                          — a typo only fails once the VM is up
   --user <name>           VM username (default: ${VM_USER}; lowercase, must
                           start with letter or _ and be <= 32 chars)
   --storage <id>          Proxmox storage for the VM disk (default: local-lvm
@@ -214,6 +220,18 @@ while [[ $# -gt 0 ]]; do
         exit 1
       }
       NODE_MAJOR="$2"; shift 2;;
+    --openclaw-version)
+      # This value is interpolated into the runcmd YAML and then into a
+      # single-quoted argument inside a 'bash -c' string, so this regex — not
+      # the quoting — is the injection barrier. The leading-alphanumeric anchor
+      # is what blocks '-'/'--' (npm flag injection) and '@'/'/' (package-spec
+      # substitution like github:owner/repo). Exact versions and dist-tags
+      # pass; ranges like '^2026.9' do not, so pin exactly or use a tag.
+      [[ "${2:-}" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$ ]] || {
+        ERROR "--openclaw-version must be an npm version or dist-tag (e.g. 2026.9.1, latest, next)"
+        exit 1
+      }
+      OPENCLAW_VERSION="$2"; shift 2;;
     --user)
       [[ "${2:-}" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { ERROR "--user must be a valid Linux username (lowercase, starts with a-z or _, max 32 chars)"; exit 1; }
       VM_USER="$2"; shift 2;;
@@ -316,6 +334,7 @@ INFO "Using VMID: $VM_ID"
 INFO "VM Name: $VM_NAME"
 INFO "Ubuntu codename: $UBUNTU_CODENAME"
 INFO "Node.js major: $NODE_MAJOR"
+INFO "OpenClaw version: $OPENCLAW_VERSION"
 INFO "VM user: $VM_USER"
 INFO "Resources: ${MEMORY_MB} MB RAM, ${CORES} cores, disk ${DISK_SIZE}, swap ${SWAP_SIZE}"
 
@@ -837,8 +856,9 @@ write_files:
       # always-on systemd user service. Invoked once by cloud-init runcmd.
       set -euo pipefail
 
-      VM_USER="${1:?usage: openclaw-provision.sh <user> <node-major>}"
-      NODE_MAJOR="${2:?usage: openclaw-provision.sh <user> <node-major>}"
+      VM_USER="${1:?usage: openclaw-provision.sh <user> <node-major> <openclaw-version>}"
+      NODE_MAJOR="${2:?usage: openclaw-provision.sh <user> <node-major> <openclaw-version>}"
+      OPENCLAW_VERSION="${3:?usage: openclaw-provision.sh <user> <node-major> <openclaw-version>}"
 
       rm -f /var/log/openclaw-install.ok /var/log/openclaw-install.fail
 
@@ -888,8 +908,9 @@ write_files:
       }
       ' || fail "installed Node ${NODE_VER} is below OpenClaw minimums (22.22.3+, 24.15+, 25.9+)"
 
-      echo "[*] Installing OpenClaw..."
-      npm install -g openclaw@latest || fail "npm install -g openclaw@latest failed"
+      echo "[*] Installing OpenClaw (${OPENCLAW_VERSION})..."
+      npm install -g "openclaw@${OPENCLAW_VERSION}" \
+        || fail "npm install -g openclaw@${OPENCLAW_VERSION} failed"
 
       command -v openclaw >/dev/null 2>&1 || fail "openclaw is not on PATH after npm install"
       # timeout, not just || : a command that HANGS under cloud-init (no TTY)
@@ -953,7 +974,7 @@ runcmd:
   # Start the guest agent so the host can resolve the VM IP.
   # The package installs but may not auto-start (static preset on newer Ubuntu).
   - [ systemctl, start, qemu-guest-agent ]
-  - [ bash, -c, "/usr/local/sbin/openclaw-provision.sh '${VM_USER}' '${NODE_MAJOR}' >/var/log/openclaw-provision.log 2>&1" ]
+  - [ bash, -c, "/usr/local/sbin/openclaw-provision.sh '${VM_USER}' '${NODE_MAJOR}' '${OPENCLAW_VERSION}' >/var/log/openclaw-provision.log 2>&1" ]
 EOF
 
 qm set "$VM_ID" --cicustom "user=${SNIPPET_STORAGE_ID}:snippets/$(basename "$USERDATA")"
@@ -1063,7 +1084,7 @@ VM_IP=""
 IP_GRACE=12   # extra iterations to keep hunting for the IP once status is known
 
 # ~17 min budget (204 x 5s + QGA call overhead). First boot runs a full
-# apt update + 8-package install before runcmd even starts, so the guest
+# apt update + 10-package install before runcmd even starts, so the guest
 # agent routinely takes several minutes to appear — that silence is normal.
 INFO "Waiting for provisioning (Node + OpenClaw) — up to ~17 minutes..."
 for _ in {1..204}; do
@@ -1154,6 +1175,7 @@ echo " Storage       : ${STORAGE}"
 echo " Snippets      : ${SNIPPET_STORAGE_ID}"
 echo " Bridge        : ${BRIDGE}"
 echo " Node.js       : ${NODE_MAJOR}.x (NodeSource)"
+echo " OpenClaw      : ${OPENCLAW_VERSION} (requested)"
 echo " Log file      : ${LOG_FILE}"
 [[ -n "${VM_IP}" ]] && echo " VM IP         : ${VM_IP}"
 if [[ "$INSTALL_OK" -eq 1 ]]; then
@@ -1186,34 +1208,42 @@ echo "       ssh ${SSH_TARGET}"
 echo
 echo "  2) Run onboarding with the pre-generated gateway token. The wizard"
 echo "     will ask for your LLM API key:"
-echo "       openclaw onboard --install-daemon --gateway-bind lan \\"
+echo "       openclaw onboard --install-daemon \\"
 echo "         --gateway-token \"\$(cat ~/.openclaw/gateway-token)\""
 echo
 echo "     Passing the token is what links that file to the gateway config —"
-echo "     nothing reads it automatically. If your OpenClaw version lacks"
-echo "     --gateway-token, onboarding mints its own token instead; either"
-echo "     way, the AUTHORITATIVE token afterwards is the one in"
-echo "     ~/.openclaw/openclaw.json under gateway.auth.token."
+echo "     nothing reads it automatically. OpenClaw 2026.9.1 applies the flag"
+echo "     correctly; older builds silently minted their own token, so the"
+echo "     value that counts is always gateway.auth.token in"
+echo "     ~/.openclaw/openclaw.json. 'openclaw gateway auth-token --show'"
+echo "     prints the live one."
 echo
 echo "  3) Start it. On a headless box XDG_RUNTIME_DIR must be exported"
 echo "     before any systemctl --user call, or it fails to find the bus:"
 echo "       export XDG_RUNTIME_DIR=/run/user/\$(id -u)"
 echo "       systemctl --user enable --now openclaw-gateway.service"
-echo "       openclaw gateway status"
+echo "       openclaw gateway status --require-rpc"
 echo
 echo "     (systemd lingering is already enabled for ${VM_USER}, so the"
 echo "      gateway survives logout and starts at boot.)"
 echo
-echo "  Control UI once running:  http://${VM_IP:-<vm-ip>}:18789"
-echo "  Logs:                     journalctl --user -u openclaw-gateway -f"
+echo "  4) Open the Control UI — NOT http://<vm-ip>:18789, which can never"
+echo "     work. The UI mints a browser device identity (WebCrypto), which"
+echo "     needs a secure context: HTTPS or localhost. Plain HTTP to a LAN IP"
+echo "     is refused however correct your token is. Tunnel it from the"
+echo "     machine whose browser you'll use (its key must be authorized here):"
+echo "       ssh -N -L 18789:127.0.0.1:18789 ${SSH_TARGET}"
+echo "     Leave that running, then browse to http://localhost:18789/"
+echo "     'openclaw dashboard --no-open' prints the URL with the token in it."
+echo "     (Tailscale Serve, Cloudflare Tunnel, nginx+TLS: README step 4.)"
 echo
-echo "${YELLOW}SECURITY${RESET} — you chose a LAN bind. OpenClaw's docs are blunt about this:"
-echo "  \"Never expose the Gateway unauthenticated on 0.0.0.0.\" A LAN bind"
-echo "  listens on 0.0.0.0, so keep auth.mode=token and firewall 18789 to a"
-echo "  tight source-IP allowlist. If Tailscale is an option, the docs prefer"
-echo "  it over a LAN bind — as Tailscale Serve (gateway stays on loopback;"
-echo "  'openclaw gateway --tailscale serve'), or as a direct tailnet bind"
-echo "  (--gateway-bind tailnet). These are two different mechanisms."
+echo "  Logs:  journalctl --user -u openclaw-gateway -f"
+echo "  Check: openclaw doctor --lint"
+echo
+echo "${YELLOW}SECURITY${RESET} — the gateway keeps its loopback default: 127.0.0.1 only,"
+echo "  with token auth on every connection. Leave it there. Opening 18789 to"
+echo "  the LAN will not make a browser work, and OpenClaw's docs are blunt:"
+echo "  \"Never expose the Gateway unauthenticated on 0.0.0.0.\""
 echo
 
 if [[ "$INSTALL_OK" -eq 1 ]]; then

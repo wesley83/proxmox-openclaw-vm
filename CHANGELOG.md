@@ -5,64 +5,106 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
-## [Unreleased]
+## [1.3.0] - 2026-09-05
 
-Compatibility review against OpenClaw 2026.9.1 (previously verified against
-2026.7.1-2). `openclaw-vm.sh` required **no functional changes** — Node
-version requirements, NodeSource majors, the apt package list, and the
-`cmake` native-module rationale are all still current, reconfirmed live in
-an Ubuntu 26.04 WSL environment. All changes are corrections/additions to
-the README's post-install guidance.
+Compatibility pass against OpenClaw 2026.9.1 (this repo was built against
+2026.7.1-2). The provisioning path needed nothing: Node version requirements,
+NodeSource majors, the apt package list, and the `cmake` native-module
+rationale were all reconfirmed against a live 2026.9.1 install. The defect was
+somewhere nobody had re-read — the instructions the script prints *after*
+provisioning.
+
+**Not re-run on Proxmox hardware.** Verified against a live OpenClaw 2026.9.1
+install, by rendering the summary block with stub values, and by host-side dry
+runs of argument parsing and the guest script's argument plumbing. The last
+hardware run was v1.1.0 in July 2026.
 
 ### Fixed
 
+- **The script's closing instructions contradicted its own README, and led
+  operators into a guaranteed failure.** They told you to pass
+  `--gateway-bind lan` and then open `http://<vm-ip>:18789` — the one URL that
+  can *never* authenticate a browser, because the Control UI mints a WebCrypto
+  device identity that only exists in a secure context (HTTPS or localhost).
+  The README was rewritten around this in v1.2.0 and given four working access
+  paths; the script's own output was never brought in line. It now drops
+  `--gateway-bind`, keeps the gateway on its loopback default, and prints a
+  real step 4 with the SSH-tunnel command inline. The stale "you chose a LAN
+  bind" security note — the operator never chose anything, there is no bind
+  flag — is replaced with an accurate loopback + token-auth one.
 - **The `--gateway-bind`/`--gateway-token` onboarding bug is resolved
   upstream.** Confirmed broken live in 2026.7.1-2 (silently ignored by the
-  default onboarding flow); re-tested directly against 2026.9.1
-  (non-interactive run, both flags, root and non-root users) and both are
-  now correctly applied to `openclaw.json`. The README's step 2 callout and
-  step 3 token-sync step are reworded from an unconditional "this is always
-  broken" claim to a version-aware, defensive "verify and fix either way"
-  framing — the sync command is harmless and idempotent regardless of which
-  behavior your OpenClaw version has.
-- **Resource-sizing table numbers were stale.** OpenClaw's own npm package
-  nearly doubled in unpacked size since 2026.7.1-2 (measured: 520 M for the
-  installed package alone on 2026.9.1, vs. a 778 M *combined* Node+OpenClaw
-  figure from 2026.7.1-2). The table now labels each figure with the
-  OpenClaw version it was measured against, rather than presenting a
-  now-understated number as current.
+  default onboarding flow); re-tested against 2026.9.1 (non-interactive run,
+  both flags, root and non-root) and both now land correctly in
+  `openclaw.json`. README step 2 and the step 3 token check are reworded from
+  an unconditional "this is always broken" claim to version-aware framing. The
+  sync command stays, because it is harmless and idempotent either way — and
+  because `--openclaw-version` now lets you pin a release that still has the
+  bug.
+- **Resource-sizing figures were stale and misordered.** OpenClaw's installed
+  package roughly doubled since 2026.7.1-2 (measured: 520 M alone on 2026.9.1,
+  against a 778 M *combined* Node+OpenClaw figure from 2026.7.1-2). Each row
+  now names the version it was measured against, and the rows are ordered so
+  the cross-reference between them reads correctly.
+- Corrected a comment claiming an "8-package install" (it is 10) and a stale
+  footprint comment citing OpenClaw at 83.4 MiB.
 
 ### Added
 
-- Documented `openclaw gateway auth-token --show` (new since 2026.7.1-2) —
-  reveals the actual configured Gateway token from an interactive terminal,
-  which didn't exist when the token-sync workaround was first written.
+- **`--openclaw-version <ver>`** — pin OpenClaw to an npm version or dist-tag
+  for reproducible builds. Defaults to `latest`, so existing behavior is
+  unchanged. Threaded to the guest as a third positional argument to the
+  provisioning script, since that script lives in a *quoted* heredoc where host
+  variables cannot expand. Validated by an anchored regex whose leading
+  alphanumeric requirement is the injection barrier — it rejects `-`/`--` (npm
+  flag injection) and `@`/`/` (package-spec substitution such as
+  `github:owner/repo`) before the value ever reaches the runcmd YAML. The
+  requested version is echoed in the startup banner and the summary.
+- Adopted OpenClaw 2026.9.1 commands that supersede hand-rolled workarounds,
+  all verified live: `gateway auth-token --show` (read the live token instead
+  of blind-setting it), `gateway status --require-rpc` (exits non-zero when the
+  probe fails, so it works in a `&&` chain), `dashboard --no-open` (prints the
+  Control UI URL with the token rather than hand-assembling a `#token=`
+  fragment), `gateway probe --ssh` (separates "tunnel broken" from "token
+  wrong"), `doctor --lint` (a new Troubleshooting entry, with `--json` and
+  `--fix`), and `gateway diagnostics export`.
+- Onboarding's `--skip-ui` flag documented as the supported way past the
+  first-chat step, replacing the previous "press Ctrl+C" advice.
 
-### Verified unchanged
+### Changed
 
-- The Control UI secure-context requirement (`control ui requires device
-  identity (use HTTPS or localhost secure context)`) — same string,
-  confirmed still present in the 2026.9.1 dist bundle. Options A–D in step
-  4 remain necessary and correct.
-- The gateway log path format for non-root users
-  (`/tmp/openclaw-<uid>/openclaw-<date>.log`, used in Troubleshooting) —
-  reconfirmed against a non-root test user; a root-only path quirk
-  (`/tmp/openclaw/...`, no uid suffix) briefly looked like a regression but
-  doesn't apply to the non-root `openclaw` user this script creates.
-- `koffi` is a new native dependency since 2026.7.1-2, but ships the same
-  per-platform-prebuild-with-source-fallback pattern as the existing native
-  deps (`@lydell/node-pty`, `sqlite-vec`) — no new package needed beyond the
-  `cmake` this script already installs.
+- **Removed the two onboarding screenshots.** They were captured on 2026.7.1-2
+  and could not be re-verified: the 2026.9.1 re-check ran `--non-interactive`
+  with every prompt skipped, which bypasses that sequence entirely, and the
+  release added `--tui`/`--classic`/`--modern`/`--skip-ui`, implying the wizard
+  changed. Step 2 now describes the flow's shape in text and says plainly that
+  wording varies by release. The Control UI failure screenshot is **kept** —
+  that failure mode was re-confirmed present in 2026.9.1.
 
-### Not verified — flagged, not fixed
+### Verified unchanged against 2026.9.1
 
-- The interactive onboarding flow's exact prompts/wording (screenshots in
-  step 2) were **not** re-checked against 2026.9.1. Our re-verification
-  used `--non-interactive` with every prompt skipped, specifically to
-  isolate the config-flag question above, so it bypassed the entire
-  interactive sequence. 2026.9.1 added `--tui`/`--classic`/`--modern`/
-  `--skip-ui` flags, suggesting the onboarding UI has changed since the
-  screenshots were captured. README now discloses this explicitly.
+- The Control UI secure-context requirement — the string `control ui requires
+  device identity (use HTTPS or localhost secure context)` and cause
+  `control-ui-insecure-auth` are both still in the dist bundle. Options A–D
+  remain necessary.
+- The non-root gateway log path (`/tmp/openclaw-<uid>/openclaw-<date>.log`)
+  used in Troubleshooting. A root-only variant without the uid suffix briefly
+  looked like a regression; it does not apply to the non-root user this script
+  creates.
+- `koffi`, a new native dependency, ships the same
+  per-platform-prebuild-with-source-fallback pattern as `@lydell/node-pty` and
+  `sqlite-vec` — the `cmake` this script already installs covers the fallback,
+  so the package list is unchanged.
+
+### Deliberately not done
+
+- Running `openclaw doctor --lint` during provisioning. Tested and rejected: at
+  that point onboarding has not run, so doctor reports `Gateway auth is off or
+  missing a token`, `gateway.mode is unset`, and `Gateway is only bound to
+  loopback` — all three being exactly the state this script intends to leave
+  behind. Wiring that into the summary would cry wolf on every successful run.
+  Doctor is documented in Troubleshooting instead, where it runs after
+  onboarding and its findings mean something.
 
 ## [1.2.1] - 2026-07-29
 
@@ -239,6 +281,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.3.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.1.0
