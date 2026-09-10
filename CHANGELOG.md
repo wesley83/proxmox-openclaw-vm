@@ -5,6 +5,56 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.4.5] - 2026-09-10
+
+Routine drift check, five days after v1.4.4, on whatever `openclaw@latest`
+resolves to today. Found that OpenClaw tightened its own Node requirement
+inside a **patch** release with no announcement: 2026.9.2's `engines.node` was
+`>=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0`; 2026.9.3's is
+`>=24.16.0 <25 || >=26.1.0`. Node 22 and Node 25 went from supported to
+unsupported at any patch level, and the Node 24/26 floors both moved up.
+
+### Fixed
+
+- **A Node/OpenClaw incompatibility could install "successfully" and report
+  provisioning OK.** `npm install -g` does not enforce the `engines` field by
+  default (`engine-strict` is off), so `npm install -g openclaw@latest`
+  succeeds even on a Node version OpenClaw's own runtime guard then refuses to
+  run on — verified by installing 2026.9.3 and confirming `engine-strict` is
+  `false`. The script's post-install check already fell back to
+  `openclaw=unknown` when `openclaw --version` failed, but nothing treated
+  `unknown` as a failure: provisioning still reported `OK
+  (node=... openclaw=unknown)`, and the operator would only discover OpenClaw
+  was unusable when `openclaw onboard` failed in step 2, disconnected from any
+  hint about Node. `unknown` is now a hard failure — it prints OpenClaw's own
+  diagnostic to the provision log and calls `fail()` with a message pointing at
+  the Node/OpenClaw version mismatch and both ways out (`--node`,
+  `--openclaw-version`). Verified with a stub binary reproducing the exact
+  failure mode (install succeeds, `--version` exits non-zero to stderr) and
+  confirmed the existing success path is untouched.
+
+### Verified unaffected
+
+- **The script's default path.** `--node` defaults to 26 via NodeSource, which
+  always installs the newest patch of a major; current release is 26.8.2,
+  comfortably above the new 26.1.0 floor. `--node 24` is likewise unaffected —
+  NodeSource's current 24.x is 24.21.0, above the new 24.16.0 floor. Only
+  `--node 22` and `--node 25`, at any patch, are now incompatible with
+  `--openclaw-version latest` — and only with `latest`; both remain valid
+  choices when pinning an older `--openclaw-version` that still supports them,
+  which is why `SUPPORTED_NODE_MAJORS` was not changed.
+
+### Notes
+
+- Deliberately did not hardcode 2026.9.3's new floor into the script's
+  pre-install Node gate (`22.22.3+/24.15+/25.9+`, still accurate for older
+  pins). That gate is now documented as a baseline sanity floor, not the
+  authoritative check — the authoritative one is the post-install
+  `openclaw --version` probe added here, which reads OpenClaw's own live
+  runtime guard for whichever version was actually installed, rather than a
+  copy of a number that just proved it can go stale inside a single patch
+  release.
+
 ## [1.4.4] - 2026-09-05
 
 The instructions assumed SSH was the only way in. It isn't, and for many first
@@ -562,6 +612,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.4.5]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.4...v1.4.5
 [1.4.4]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.3...v1.4.4
 [1.4.3]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.2...v1.4.3
 [1.4.2]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.1...v1.4.2

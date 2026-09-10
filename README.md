@@ -2,7 +2,7 @@
 ### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
 Created by **Wesley Faulkner**
 
-**Current release: [v1.4.4](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.4)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Current release: [v1.4.5](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.5)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
 
@@ -35,6 +35,8 @@ Created by **Wesley Faulkner**
 **Run end to end on real Proxmox VE hardware (PVE 7), including onboarding.** In July 2026, against `openclaw 2026.7.1-2`, a full run on a `local-lvm` + directory-snippet-storage node completed: disk import/resize on thin-LVM, cloud-init, Node v26.5.1, gateway token generated, provisioning confirmed via QEMU Guest Agent — exit 0. Onboarding was then completed interactively (LLM provider, messaging channel, web search), the gateway daemon was enabled and started as a systemd user service, and the Control UI was reached successfully through an SSH tunnel. Everything in [After the Script Finishes](#-after-the-script-finishes) is written from that run, including the Control UI secure-context problem in step 4 — which is documented here because it was hit for real, not anticipated.
 
 **Re-confirmed on hardware at v1.4.0** (September 2026, same PVE 7 node). A clean run provisioned Node v26.8.1 and OpenClaw 2026.9.2 end to end — disk import and resize on thin-LVM, snippet storage on a *different* storage than the VM disk, cloud-init, DHCP IP detection, and QGA-confirmed provisioning — exit 0. That covers everything added since v1.2.1: the `--openclaw-version` plumbing, the rewritten post-install instructions, the exit-code normalization, and the new preflight advisories. Onboarding itself has not been re-run since July.
+
+**A live compatibility check five days later (v1.4.5) found OpenClaw had tightened its Node requirement inside a patch release** — 2026.9.2 → 2026.9.3 dropped Node 22 and 25 support entirely and raised the Node 24/26 floors, with no announcement. `npm install` does not enforce this (`engine-strict` is off by default), so the install itself doesn't fail — only OpenClaw's own runtime guard does, when you try to run it. This script's default (Node 26 via NodeSource) and its `--node 24` option are both unaffected in practice, since NodeSource always installs the newest patch of a major and both comfortably clear the new floors. `--node 22` and `--node 25` do not clear it for `--openclaw-version latest`. The script no longer trusts a successful `npm install` — see the [Fixed](CHANGELOG.md#145---2026-09-10) entry for what changed.
 
 ---
 

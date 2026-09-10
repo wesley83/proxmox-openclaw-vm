@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.4.4
+# Version: v1.4.5
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.4.4"
+SCRIPT_VERSION="v1.4.5"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -1091,6 +1091,17 @@ write_files:
       # Verify against OpenClaw's documented minimums rather than trusting the
       # repo to have shipped what we asked for. Ubuntu's own apt node is 18,
       # which silently breaks OpenClaw and anything Playwright-shaped.
+      #
+      # This is a baseline sanity floor, not the authoritative check: these
+      # numbers are known accurate as of 2026.9.2 but OpenClaw has tightened
+      # its actual floor inside a patch release before (2026.9.2 -> 2026.9.3
+      # dropped Node 22 and 25 support entirely). --node stays a version-
+      # agnostic choice deliberately, since --openclaw-version can pin an
+      # older release these older majors legitimately support. The check that
+      # actually matters for the SPECIFIC version being installed is the
+      # `openclaw --version` probe after install, below -- that reads
+      # OpenClaw's own live runtime guard rather than a copy of it that can
+      # drift out of sync here.
       node -e '
       const [maj, min, pat] = process.versions.node.split(".").map(Number);
       const ok =
@@ -1119,6 +1130,22 @@ write_files:
       OPENCLAW_VER="$(timeout 60 openclaw --version 2>/dev/null \
         | sed 's/^OpenClaw[[:space:]]*//' || echo unknown)"
       [ -n "$OPENCLAW_VER" ] || OPENCLAW_VER=unknown
+      # A version string that can't be read means openclaw is not actually
+      # usable -- most likely a Node/OpenClaw compatibility mismatch. npm does
+      # NOT enforce the `engines` field on install (engine-strict defaults to
+      # false), so `npm install -g` can succeed on a Node version OpenClaw's
+      # own runtime guard then refuses to run on. This has bitten a live
+      # release before: OpenClaw 2026.9.2 -> 2026.9.3, a PATCH bump, dropped
+      # Node 22 and 25 support entirely with no warning at install time.
+      # Reflecting that floor here would only go stale again at the next
+      # upstream release, so fail loudly instead of hardcoding a number:
+      # print openclaw's own diagnostic to the provision log, and treat this
+      # as a hard failure rather than reporting OK with a broken install.
+      if [ "$OPENCLAW_VER" = "unknown" ]; then
+        echo "[*] openclaw --version diagnostic:"
+        timeout 60 openclaw --version 2>&1 | head -5 || true
+        fail "openclaw installed but --version failed -- Node ${NODE_VER} is likely incompatible with openclaw@${OPENCLAW_VERSION}. Try a different --node major, or pin an --openclaw-version known to support this Node."
+      fi
       echo "[*] OpenClaw installed: ${OPENCLAW_VER}"
 
       # The gateway runs as a systemd USER service. Without lingering it does
