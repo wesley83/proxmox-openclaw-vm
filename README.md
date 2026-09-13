@@ -2,7 +2,7 @@
 ### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
 Created by **Wesley Faulkner**
 
-**Current release: [v1.4.5](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.5)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Current release: [v1.4.6](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.6)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
 
@@ -37,6 +37,8 @@ Created by **Wesley Faulkner**
 **Re-confirmed on hardware at v1.4.0** (September 2026, same PVE 7 node). A clean run provisioned Node v26.8.1 and OpenClaw 2026.9.2 end to end — disk import and resize on thin-LVM, snippet storage on a *different* storage than the VM disk, cloud-init, DHCP IP detection, and QGA-confirmed provisioning — exit 0. That covers everything added since v1.2.1: the `--openclaw-version` plumbing, the rewritten post-install instructions, the exit-code normalization, and the new preflight advisories. Onboarding itself has not been re-run since July.
 
 **A live compatibility check five days later (v1.4.5) found OpenClaw had tightened its Node requirement inside a patch release** — 2026.9.2 → 2026.9.3 dropped Node 22 and 25 support entirely and raised the Node 24/26 floors, with no announcement. `npm install` does not enforce this (`engine-strict` is off by default), so the install itself doesn't fail — only OpenClaw's own runtime guard does, when you try to run it. This script's default (Node 26 via NodeSource) and its `--node 24` option are both unaffected in practice, since NodeSource always installs the newest patch of a major and both comfortably clear the new floors. `--node 22` and `--node 25` do not clear it for `--openclaw-version latest`. The script no longer trusts a successful `npm install` — see the [Fixed](CHANGELOG.md#145---2026-09-10) entry for what changed.
+
+**Three days after that (v1.4.6), the same drift check found the v1.4.5 fix itself needed a fix.** OpenClaw 2026.9.4 added a "diagnostic exemption" that lets `openclaw --version` print a real version and exit 0 on a Node it does not actually support — verified live on an isolated Node 22 with no other Node reachable to recover to: `--version` succeeded while `openclaw onboard` genuinely failed with a real Node/OpenClaw incompatibility (`node:sqlite truncates TEXT at embedded NUL`). The v1.4.5 check alone would have missed this. The script now also checks for OpenClaw's own "unsupported Node" warning, which is still written to stderr even on that exit-0 path. Testing this also caught a real regression in the v1.4.5-era code before it shipped further: a bare version check with no output at all (a fully broken install) hit a `pipefail` edge case that aborted the provisioning script silently, with no `.fail` file and no message — fixed in the same pass.
 
 ---
 

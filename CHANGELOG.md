@@ -5,6 +5,71 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.4.6] - 2026-09-13
+
+Another routine drift check, three days after v1.4.5. `openclaw@latest` moved
+again, from 2026.9.3 to 2026.9.4. This time the finding was in the fix from
+the last check, not in OpenClaw's compatibility floor itself.
+
+### Fixed
+
+- **The v1.4.5 fix could be silently bypassed.** OpenClaw 2026.9.4 added a
+  "diagnostic exemption": `--version`/`--help`, `gateway status`, and
+  `doctor`/`triage`/`update` with certain flags are now allowed to run on a
+  Node major OpenClaw does not otherwise support, as long as that Node is new
+  enough to execute the diagnostic path itself (`>=22.0.0` with `node:sqlite`
+  available). Verified live: with PATH restricted to only an unsupported Node
+  22 build (no other Node reachable, so runtime recovery has nothing to find
+  either), `openclaw --version` printed a clean version string and exited 0,
+  while `openclaw onboard` — a real, non-exempt command — genuinely failed
+  with `node:sqlite truncates TEXT at embedded NUL`. v1.4.5's check trusted
+  exactly the signal (`--version` succeeding) that this exemption was built to
+  make misleading.
+
+  The fix does not try to track OpenClaw's internal exemption list, which is
+  brand new in this release and still visibly in flux — that would only go
+  stale again at the next patch. Instead it checks for OpenClaw's own
+  "Running on an unsupported Node" warning, which the exempted path still
+  writes to stderr even while exiting 0. That string is emitted by an
+  exported, intentionally user-facing function
+  (`formatUnsupportedNodeDiagnosticWarning`), which is more stable to key on
+  than the logic that triggers it, but is still wording rather than a
+  contract — if it goes silent in a future release, that is exactly the kind
+  of drift this repo's checks exist to catch, and the next verification pass
+  will find it.
+
+- **A real regression in the v1.4.5 code, caught before it saw more traffic.**
+  Rewriting the check to inspect combined stdout+stderr introduced a
+  `grep -m1 '^OpenClaw '` with no match on truly empty output (a completely
+  broken install, `--version` producing nothing at all). Under `pipefail`,
+  grep's own no-match exit status propagated to the enclosing assignment, and
+  `set -e` aborted the provisioning script right there — silently, with no
+  `.fail` file written and no message at all, worse than the plain failure
+  v1.4.5 was written to replace. Caught specifically by testing the "produces
+  nothing" case, which the happy-path and exemption-bypass tests alone did not
+  exercise. Fixed with an explicit `|| true` on that pipeline.
+
+### Verified on 2026.9.4
+
+- `engines.node` unchanged from 2026.9.3 (`>=24.16.0 <25 || >=26.1.0`) — no
+  further tightening this release.
+- All CLI surface used elsewhere in this script and README unchanged:
+  `--install-daemon`, `--gateway-token`, `--skip-ui`, `--tui`,
+  `gateway auth-token --show`, `gateway status --require-rpc`,
+  `dashboard --no-open`, `doctor --lint`.
+- `--gateway-token` still honored end to end (live non-interactive onboard,
+  token stored verbatim, `mode: token`, `bind: loopback`).
+- Control UI secure-context requirement and `openclaw-gateway.service` unit
+  name both unchanged.
+
+### Notes
+
+- All three post-install cases were re-verified against the fixed script:
+  a healthy Node (real version reported, no failure), the isolated unsupported
+  Node 22 (now correctly fails with a diagnostic), and a completely broken
+  install producing no output (now correctly fails instead of aborting
+  silently).
+
 ## [1.4.5] - 2026-09-10
 
 Routine drift check, five days after v1.4.4, on whatever `openclaw@latest`
@@ -612,6 +677,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.4.6]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.5...v1.4.6
 [1.4.5]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.4...v1.4.5
 [1.4.4]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.3...v1.4.4
 [1.4.3]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.2...v1.4.3

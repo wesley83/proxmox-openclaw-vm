@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.4.5
+# Version: v1.4.6
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.4.5"
+SCRIPT_VERSION="v1.4.6"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -1122,13 +1122,35 @@ write_files:
       command -v openclaw >/dev/null 2>&1 || fail "openclaw is not on PATH after npm install"
       # timeout, not just || : a command that HANGS under cloud-init (no TTY)
       # would wedge provisioning forever with no status file ever written.
-      # `openclaw --version` prints "OpenClaw <ver> (<hash>)". Strip the leading
-      # product name so the status file reads "openclaw=2026.9.2 (3928bad)"
-      # rather than "openclaw=OpenClaw 2026.9.2 (3928bad)", which the host then
-      # prints back inside its own parentheses. The sed is a no-op if upstream
-      # ever changes the format, so an unexpected string still passes through.
-      OPENCLAW_VER="$(timeout 60 openclaw --version 2>/dev/null \
-        | sed 's/^OpenClaw[[:space:]]*//' || echo unknown)"
+      # Captured once, stdout+stderr together (never discarded): OpenClaw
+      # 2026.9.4 added a "diagnostic exemption" that lets --version print a
+      # real version and exit 0 on a Node major it does NOT actually support,
+      # as long as that Node is new enough to run the diagnostic path itself
+      # (>=22 with node:sqlite). Verified live: on an isolated Node 22 with no
+      # other Node reachable to fall back to, `openclaw --version` printed a
+      # clean version and exited 0, while `openclaw onboard` genuinely failed
+      # ("node:sqlite truncates TEXT at embedded NUL"). A parsed version and a
+      # 0 exit code can no longer prove the install is usable on their own --
+      # the one thing that still told the truth in that test was OpenClaw
+      # writing "Running on an unsupported Node" to stderr even while exiting
+      # 0, so both signals are checked below.
+      OPENCLAW_VER_RAW="$(timeout 60 openclaw --version 2>&1 || true)"
+      # `openclaw --version` prints "OpenClaw <ver> (<hash>)" on its own line;
+      # matched explicitly (not just "first line") so stray stderr output
+      # ahead of it can never be mistaken for a version. Stripped to the
+      # bare "<ver> (<hash>)" so the status file reads "openclaw=2026.9.2
+      # (3928bad)" rather than "openclaw=OpenClaw 2026.9.2 (3928bad)", which
+      # the host then prints back inside its own parentheses.
+      # `|| true` guards against pipefail: grep's own exit status is 1 when
+      # nothing matches (the failure case this whole block exists to catch),
+      # and under pipefail that propagates to this assignment same as any
+      # other failing command -- without the guard, `set -e` would abort the
+      # provisioning script right here, silently, with no .fail file ever
+      # written and no message at all. Caught by testing the "openclaw
+      # produces nothing" case specifically, which the happy-path and
+      # exemption-bypass tests alone did not exercise.
+      OPENCLAW_VER="$(printf '%s\n' "$OPENCLAW_VER_RAW" \
+        | grep -m1 '^OpenClaw ' | sed 's/^OpenClaw[[:space:]]*//' || true)"
       [ -n "$OPENCLAW_VER" ] || OPENCLAW_VER=unknown
       # A version string that can't be read means openclaw is not actually
       # usable -- most likely a Node/OpenClaw compatibility mismatch. npm does
@@ -1137,14 +1159,22 @@ write_files:
       # own runtime guard then refuses to run on. This has bitten a live
       # release before: OpenClaw 2026.9.2 -> 2026.9.3, a PATCH bump, dropped
       # Node 22 and 25 support entirely with no warning at install time.
-      # Reflecting that floor here would only go stale again at the next
-      # upstream release, so fail loudly instead of hardcoding a number:
-      # print openclaw's own diagnostic to the provision log, and treat this
-      # as a hard failure rather than reporting OK with a broken install.
-      if [ "$OPENCLAW_VER" = "unknown" ]; then
+      # Reflecting either floor here would only go stale again at the next
+      # upstream release (2026.9.3 -> 2026.9.4 already added a whole new
+      # exemption mechanism around it), so fail loudly instead of hardcoding
+      # a number: print openclaw's own diagnostic to the provision log, and
+      # treat either failure signal as hard rather than reporting OK with a
+      # broken install. The "unsupported Node" grep is upstream's own exported
+      # formatUnsupportedNodeDiagnosticWarning() text -- an intentionally
+      # user-facing message, so more stable to key on than the exemption
+      # logic that triggers it, but still wording, not a stable API; if it
+      # goes silent again after a future release, that is exactly the kind of
+      # drift this repo's compatibility checks exist to catch.
+      if [ "$OPENCLAW_VER" = "unknown" ] \
+        || printf '%s\n' "$OPENCLAW_VER_RAW" | grep -qi "unsupported node"; then
         echo "[*] openclaw --version diagnostic:"
-        timeout 60 openclaw --version 2>&1 | head -5 || true
-        fail "openclaw installed but --version failed -- Node ${NODE_VER} is likely incompatible with openclaw@${OPENCLAW_VERSION}. Try a different --node major, or pin an --openclaw-version known to support this Node."
+        printf '%s\n' "$OPENCLAW_VER_RAW" | head -5
+        fail "openclaw installed but is not usable on Node ${NODE_VER} (openclaw@${OPENCLAW_VERSION}). Try a different --node major, or pin an --openclaw-version known to support this Node."
       fi
       echo "[*] OpenClaw installed: ${OPENCLAW_VER}"
 
