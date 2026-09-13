@@ -2,7 +2,7 @@
 ### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
 Created by **Wesley Faulkner**
 
-**Current release: [v1.4.6](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.4.6)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Current release: [v1.5.0](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.5.0)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
 
@@ -36,7 +36,7 @@ Created by **Wesley Faulkner**
 
 **Re-confirmed on hardware at v1.4.0** (September 2026, same PVE 7 node). A clean run provisioned Node v26.8.1 and OpenClaw 2026.9.2 end to end — disk import and resize on thin-LVM, snippet storage on a *different* storage than the VM disk, cloud-init, DHCP IP detection, and QGA-confirmed provisioning — exit 0. That covers everything added since v1.2.1: the `--openclaw-version` plumbing, the rewritten post-install instructions, the exit-code normalization, and the new preflight advisories. Onboarding itself has not been re-run since July.
 
-**A live compatibility check five days later (v1.4.5) found OpenClaw had tightened its Node requirement inside a patch release** — 2026.9.2 → 2026.9.3 dropped Node 22 and 25 support entirely and raised the Node 24/26 floors, with no announcement. `npm install` does not enforce this (`engine-strict` is off by default), so the install itself doesn't fail — only OpenClaw's own runtime guard does, when you try to run it. This script's default (Node 26 via NodeSource) and its `--node 24` option are both unaffected in practice, since NodeSource always installs the newest patch of a major and both comfortably clear the new floors. `--node 22` and `--node 25` do not clear it for `--openclaw-version latest`. The script no longer trusts a successful `npm install` — see the [Fixed](CHANGELOG.md#145---2026-09-10) entry for what changed.
+**A live compatibility check five days later (v1.4.5) found OpenClaw had tightened its Node requirement inside a patch release** — 2026.9.2 → 2026.9.3 dropped Node 22 and 25 support entirely and raised the Node 24/26 floors, with no announcement. `npm install` does not enforce this (`engine-strict` is off by default), so the install itself doesn't fail — only OpenClaw's own runtime guard does, when you try to run it. This script's default was Node 26 at the time; as of v1.5.0 it is Node 24, matching OpenClaw's own installer, which provisions the LTS line on Linux specifically so a fresh install never receives a prerelease runtime. `--node 22` and `--node 25` do not clear it for `--openclaw-version latest`. The script no longer trusts a successful `npm install` — see the [Fixed](CHANGELOG.md#145---2026-09-10) entry for what changed.
 
 **Three days after that (v1.4.6), the same drift check found the v1.4.5 fix itself needed a fix.** OpenClaw 2026.9.4 added a "diagnostic exemption" that lets `openclaw --version` print a real version and exit 0 on a Node it does not actually support — verified live on an isolated Node 22 with no other Node reachable to recover to: `--version` succeeded while `openclaw onboard` genuinely failed with a real Node/OpenClaw incompatibility (`node:sqlite truncates TEXT at embedded NUL`). The v1.4.5 check alone would have missed this. The script now also checks for OpenClaw's own "unsupported Node" warning, which is still written to stderr even on that exit-0 path. Testing this also caught a real regression in the v1.4.5-era code before it shipped further: a bare version check with no output at all (a fully broken install) hit a `pipefail` edge case that aborted the provisioning script silently, with no `.fail` file and no message — fixed in the same pass.
 
@@ -121,7 +121,7 @@ This is the most common reason a first run fails immediately.
 | `-d`, `--disk <SIZE>` | Disk size with suffix. Minimum `8G`, warns below `20G`; must also exceed the image's ~3.5 GiB virtual size, since `qm resize` cannot shrink | `40G` |
 | `-s`, `--swap <SIZE>` | Swapfile size, or `0` to disable. Cloud images ship with **no swap** | `2G` |
 | `-u`, `--ubuntu <codename>` | Ubuntu codename (`resolute`, `noble`, `jammy`, …) | latest active LTS (auto-detected; falls back to `noble`) |
-| `-n`, `--node <major>` | Node.js major version | `26` (supported: `22 24 25 26`) |
+| `-n`, `--node <major>` | Node.js major version. Defaults to the **LTS** line, matching OpenClaw's own installer — NodeSource ships the newest patch of whatever major you ask for, and Node 26 is the Current line (LTS in Oct 2026), so defaulting to 26 can hand a fresh VM a prerelease runtime | `24` (supported: `22 24 25 26`) |
 | `--openclaw-version <v>` | OpenClaw npm version or dist-tag. Pin it (e.g. `2026.9.1`) for reproducible builds — OpenClaw ships often and `latest` means two VMs built months apart get different software. Not validated against the registry, so a typo only surfaces once the VM is up | `latest` |
 | `--user <name>` | VM username (lowercase, starts with a–z or `_`, ≤ 32 chars) | `openclaw` |
 | `--storage <id>` | Proxmox storage for the VM disk. An explicit value is always honored as-is; auto-selection skips a storage without room (see below) | `local-lvm` if present, else first active storage with `images` content |
@@ -156,7 +156,7 @@ bash openclaw-vm.sh --openclaw-version 2026.9.1
 | CPU / Machine | `host` / `q35` |
 | Autostart | `--onboot 1` — this is an always-on assistant |
 | Guest Agent | Installed and started (used for status polling and IP detection) |
-| Node.js | NodeSource, version-verified against OpenClaw's minimums |
+| Node.js | NodeSource, Node 24 (LTS) by default; validated by a runtime capability probe, not a version number |
 | Build toolchain | `build-essential python3 cmake` — matches what OpenClaw's own `install.sh` installs on Debian/Ubuntu |
 | OpenClaw | `npm install -g openclaw@latest` — pin a version with `--openclaw-version` |
 | Gateway port | `18789` (not yet listening — set during onboarding) |

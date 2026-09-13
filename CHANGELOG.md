@@ -5,6 +5,70 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.5.0] - 2026-09-13
+
+Research into autodetecting an existing Node/Bun runtime turned up two things
+worth acting on immediately, independent of that feature. Both come from
+reading OpenClaw's own installer (`install.sh`, 4,219 lines), which solves the
+same problems this script does.
+
+### Changed
+
+- **Default Node major is now 24, not 26.** OpenClaw's installer sets
+  `NODE_LINUX_DEFAULT_MAJOR=24` with an explicit rationale: *"Linux package
+  repositories can publish builds ahead of the Node release line. Provision
+  the supported LTS line there so a fresh install never receives a prerelease
+  runtime."* Node 26 is the Current line — it does not become LTS until
+  October 2026 — and NodeSource always installs the newest patch of whichever
+  major you request, so a default of 26 could hand a freshly provisioned VM a
+  prerelease runtime. Node 26 is still available via `--node 26`, and upstream
+  still recommends it generally; it is just not the right default for an
+  unattended Linux provision. This is a behaviour change for anyone relying on
+  the default, which is why this is a minor bump.
+
+### Fixed
+
+- **Replaced the hardcoded Node version gate with a capability probe.** The
+  pre-install gate encoded `22.22.3+ / 24.15+ / 25.9+` — floors that were
+  already stale (upstream moved to `24.16+ / 26.1+` in 2026.9.3), and that
+  would accept exactly the Node 22 and 25 builds OpenClaw now refuses. Any
+  number hardcoded there is stale on arrival: upstream moved its floor twice
+  inside patch releases in eight days, and the floors also conflict with
+  `--openclaw-version`, where an older pin legitimately supports older majors.
+
+  The gate is now a behavioural probe lifted from OpenClaw's own installer
+  (`node_binary_has_safe_sqlite`): it opens `node:sqlite`, verifies the SQLite
+  build is WAL-reset-safe, and round-trips embedded NUL bytes through TEXT,
+  BLOB and JSON columns. That is the failure runtimes are actually rejected
+  for (nodejs/node#61954 truncates TEXT at the first NUL). Testing behaviour
+  rather than version numbers means this gate needs no maintenance when
+  upstream moves a floor again.
+
+  Verified to discriminate correctly, as embedded in the script: Node 24.19.0
+  passes, Bun 1.4.2 passes, Node 22.23.2 fails with the exact upstream
+  diagnostic. It also now runs **before** the OpenClaw install rather than
+  after — it only needs `node:sqlite` — so a bad runtime fails in seconds
+  instead of after a ~520 MB npm install. Confirmed end to end.
+
+### Notes
+
+- The post-install check from v1.4.6 stays, and is now documented as the
+  second of two layers rather than the only one. The probe tests what a
+  runtime can *do*, which is version-agnostic; OpenClaw also rejects on pure
+  version grounds (`engines` is `>=24.16.0 <25 || >=26.1.0`, so a Node 25 with
+  a perfectly good SQLite build passes the probe and is still refused). Only
+  OpenClaw knows that verdict for the version actually installed, which is
+  what the post-install check asks it.
+- `SUPPORTED_NODE_MAJORS` is unchanged at `22 24 25 26`. Those majors remain
+  legitimate when pinning an older `--openclaw-version`; the two layers above
+  now fail loudly at provision time when a combination genuinely does not
+  work, which is better than forbidding it up front.
+- One implementation hazard worth recording: writing the probe's `\u0000`
+  escape through an editing tool produced **literal NUL bytes** in the script,
+  which made git treat it as binary and destroyed the test's meaning. The
+  probe now builds those bytes with `String.fromCharCode(0)`, which no editor
+  or `sed` pass can mangle.
+
 ## [1.4.6] - 2026-09-13
 
 Another routine drift check, three days after v1.4.5. `openclaw@latest` moved
@@ -677,6 +741,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.5.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.6...v1.5.0
 [1.4.6]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.5...v1.4.6
 [1.4.5]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.4...v1.4.5
 [1.4.4]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.3...v1.4.4

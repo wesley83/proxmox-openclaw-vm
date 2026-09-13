@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.4.6
+# Version: v1.5.0
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.4.6"
+SCRIPT_VERSION="v1.5.0"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -98,7 +98,16 @@ REC_DISK_G=20
 REC_STORAGE_FREE_G=10
 UBUNTU_CODENAME="noble"   # Fallback if LTS auto-detection fails
 VM_USER="openclaw"
-NODE_MAJOR=26             # OpenClaw docs recommend Node 26
+# Node 24, not 26, deliberately. OpenClaw's own installer sets
+# NODE_LINUX_DEFAULT_MAJOR=24 with this rationale: "Linux package repositories
+# can publish builds ahead of the Node release line. Provision the supported
+# LTS line there so a fresh install never receives a prerelease runtime."
+# Node 26 is the Current line, not LTS until October 2026, and NodeSource
+# always installs the newest patch of whatever major you ask for -- so a
+# default of 26 can hand a fresh VM a prerelease runtime. 26 remains available
+# via --node 26; upstream still recommends it generally, just not as the
+# default for an unattended Linux provision.
+NODE_MAJOR=24             # matches OpenClaw installer's Linux default
 OPENCLAW_VERSION="latest" # npm version or dist-tag; pin with --openclaw-version
 SSH_KEY_PATH="auto"       # auto-detect /root/.ssh/id_ed25519.pub or id_rsa.pub
 STORAGE_ID="auto"         # VM disk storage; set via --storage
@@ -1088,32 +1097,65 @@ write_files:
       NODE_VER="$(node -v)"
       echo "[*] Node installed: ${NODE_VER}"
 
-      # Verify against OpenClaw's documented minimums rather than trusting the
-      # repo to have shipped what we asked for. Ubuntu's own apt node is 18,
-      # which silently breaks OpenClaw and anything Playwright-shaped.
+      # Verify the runtime actually WORKS rather than trusting a version
+      # number. Ubuntu's own apt node is 18, which silently breaks OpenClaw
+      # and anything Playwright-shaped -- but version floors alone have proven
+      # a bad gate here: OpenClaw moved its own floor twice inside patch
+      # releases (2026.9.2 -> .3 -> .4), so any number hardcoded here is
+      # stale on arrival, and it also conflicts with --openclaw-version, where
+      # an older pin legitimately supports older majors.
       #
-      # This is a baseline sanity floor, not the authoritative check: these
-      # numbers are known accurate as of 2026.9.2 but OpenClaw has tightened
-      # its actual floor inside a patch release before (2026.9.2 -> 2026.9.3
-      # dropped Node 22 and 25 support entirely). --node stays a version-
-      # agnostic choice deliberately, since --openclaw-version can pin an
-      # older release these older majors legitimately support. The check that
-      # actually matters for the SPECIFIC version being installed is the
-      # `openclaw --version` probe after install, below -- that reads
-      # OpenClaw's own live runtime guard rather than a copy of it that can
-      # drift out of sync here.
-      node -e '
-      const [maj, min, pat] = process.versions.node.split(".").map(Number);
-      const ok =
-        (maj === 22 && (min > 22 || (min === 22 && pat >= 3))) ||
-        (maj === 24 && min >= 15) ||
-        (maj === 25 && min >= 9) ||
-        maj >= 26;
-      if (!ok) {
-        console.error("Node " + process.versions.node + " is below OpenClaw minimums.");
-        process.exit(1);
+      # This is a behavioural probe instead, lifted from OpenClaw's own
+      # installer (node_binary_has_safe_sqlite in install.sh). It opens
+      # node:sqlite, checks the SQLite build is WAL-reset-safe, and
+      # round-trips embedded NUL bytes through TEXT, BLOB and JSON columns.
+      # That is the failure OpenClaw actually rejects runtimes for
+      # (nodejs/node#61954 truncates TEXT at the first NUL), and testing the
+      # behaviour means this gate needs no maintenance when upstream moves a
+      # floor again. Verified to discriminate correctly: Node 24.19 and Bun
+      # 1.4.2 pass, Node 22.23.2 fails with the exact upstream diagnostic.
+      #
+      # It runs BEFORE the OpenClaw install on purpose -- it only needs
+      # node:sqlite, so a broken runtime fails here in seconds instead of
+      # after a ~520 MB npm install. Uses only double quotes so it survives
+      # being wrapped in node -e '...' inside this quoted heredoc.
+      node --no-warnings -e '
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(":memory:");
+      try {
+        const value = db.prepare("SELECT sqlite_version() AS version").get()?.version;
+        const match = typeof value === "string" ? /^(\d+)\.(\d+)\.(\d+)$/.exec(value) : null;
+        const major = Number(match?.[1]);
+        const minor = Number(match?.[2]);
+        const patch = Number(match?.[3]);
+        const safe =
+          major > 3 ||
+          (major === 3 &&
+            (minor > 51 ||
+              (minor === 51 && patch >= 3) ||
+              (minor === 50 && patch >= 7) ||
+              (minor === 44 && patch >= 6)));
+        const text = "a" + String.fromCharCode(0) + "b" + String.fromCharCode(0);
+        const bytes = Buffer.from(text, "utf8");
+        const json = JSON.stringify({ value: text });
+        db.exec("CREATE TABLE probe (text_value TEXT, blob_value BLOB, json_value TEXT)");
+        db.prepare("INSERT INTO probe VALUES (?, ?, ?)").run(text, bytes, json);
+        const row = db.prepare("SELECT text_value, blob_value, json_value FROM probe").get();
+        const textSafe = typeof row?.text_value === "string" && row.text_value.length === text.length && Buffer.from(row.text_value, "utf8").equals(bytes);
+        const blobSafe = row?.blob_value instanceof Uint8Array && Buffer.from(row.blob_value).equals(bytes);
+        const jsonSafe = row?.json_value === json && JSON.parse(row.json_value).value === text;
+        if (!textSafe) {
+          console.error("Node " + process.versions.node + ": node:sqlite truncates TEXT at embedded NUL (nodejs/node#61954)");
+        } else if (!blobSafe || !jsonSafe) {
+          console.error("Node " + process.versions.node + ": node:sqlite NUL round-trip probe failed");
+        } else if (!safe) {
+          console.error("Node " + process.versions.node + ": SQLite " + value + " is not WAL-reset-safe");
+        }
+        if (!safe || !textSafe || !blobSafe || !jsonSafe) process.exitCode = 1;
+      } finally {
+        db.close();
       }
-      ' || fail "installed Node ${NODE_VER} is below OpenClaw minimums (22.22.3+, 24.15+, 25.9+)"
+      ' || fail "Node ${NODE_VER} failed OpenClaw's runtime capability probe (see the diagnostic above). Pick a different --node major -- ${NODE_MAJOR} is not usable."
 
       echo "[*] Installing OpenClaw (${OPENCLAW_VERSION})..."
       npm install -g "openclaw@${OPENCLAW_VERSION}" \
@@ -1152,24 +1194,30 @@ write_files:
       OPENCLAW_VER="$(printf '%s\n' "$OPENCLAW_VER_RAW" \
         | grep -m1 '^OpenClaw ' | sed 's/^OpenClaw[[:space:]]*//' || true)"
       [ -n "$OPENCLAW_VER" ] || OPENCLAW_VER=unknown
-      # A version string that can't be read means openclaw is not actually
-      # usable -- most likely a Node/OpenClaw compatibility mismatch. npm does
-      # NOT enforce the `engines` field on install (engine-strict defaults to
-      # false), so `npm install -g` can succeed on a Node version OpenClaw's
-      # own runtime guard then refuses to run on. This has bitten a live
-      # release before: OpenClaw 2026.9.2 -> 2026.9.3, a PATCH bump, dropped
-      # Node 22 and 25 support entirely with no warning at install time.
-      # Reflecting either floor here would only go stale again at the next
-      # upstream release (2026.9.3 -> 2026.9.4 already added a whole new
-      # exemption mechanism around it), so fail loudly instead of hardcoding
-      # a number: print openclaw's own diagnostic to the provision log, and
-      # treat either failure signal as hard rather than reporting OK with a
-      # broken install. The "unsupported Node" grep is upstream's own exported
-      # formatUnsupportedNodeDiagnosticWarning() text -- an intentionally
-      # user-facing message, so more stable to key on than the exemption
-      # logic that triggers it, but still wording, not a stable API; if it
-      # goes silent again after a future release, that is exactly the kind of
-      # drift this repo's compatibility checks exist to catch.
+      # Second of two layers, and still needed after the capability probe
+      # above. The probe tests what the runtime can DO (node:sqlite NUL
+      # handling), which is version-agnostic and needs no maintenance. But
+      # OpenClaw also rejects runtimes on pure version grounds: its engines
+      # field is `>=24.16.0 <25 || >=26.1.0`, so a Node 25 with a perfectly
+      # good SQLite build passes the probe and is still refused. Only OpenClaw
+      # itself knows that verdict for the version actually installed, which is
+      # what this asks it.
+      #
+      # npm does NOT enforce `engines` on install (engine-strict defaults to
+      # false), so `npm install -g` can succeed on a runtime OpenClaw then
+      # refuses to run on -- which has bitten a live release: 2026.9.2 -> .3,
+      # a PATCH bump, dropped Node 22 and 25 entirely with no install-time
+      # warning. Hardcoding either floor here would go stale the same way, so
+      # this reads OpenClaw's own answer instead.
+      #
+      # The "unsupported Node" grep is upstream's exported
+      # formatUnsupportedNodeDiagnosticWarning() text -- intentionally
+      # user-facing, so more stable to key on than the exemption logic that
+      # triggers it (2026.9.4 lets --version exit 0 on an unsupported runtime,
+      # which is why exit code alone is not trusted here), but it is still
+      # wording, not a contract. If it goes silent after a future release the
+      # probe above still covers the capability case, and the next
+      # verification pass catches the rest.
       if [ "$OPENCLAW_VER" = "unknown" ] \
         || printf '%s\n' "$OPENCLAW_VER_RAW" | grep -qi "unsupported node"; then
         echo "[*] openclaw --version diagnostic:"
