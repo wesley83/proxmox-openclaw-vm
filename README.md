@@ -1,306 +1,192 @@
-# 🦞 **openclaw-vm**
-### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
-Created by **Wesley Faulkner**
+# 🦞 openclaw-vm
 
-**Current release: [v1.6.0](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.6.0)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**One command to create an Ubuntu VM on Proxmox VE with [OpenClaw](https://github.com/openclaw/openclaw) installed and ready to set up.**
 
-**Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
-
-> **Two things that trip up most first runs**, both covered below:
-> 1. **Snippets storage must be enabled once** in the Proxmox GUI, or the script fails immediately — [how](#enable-snippets-required-once).
-> 2. **`http://<vm-ip>:18789` will never load the Control UI**, no matter how correct your token is. That is by design, not a bug in this script — [why, and the four things that do work](#4-access-the-control-ui).
-
----
-
-## 🚀 Overview
-
-`openclaw-vm.sh` is a one-command installer that creates a fully configured **Ubuntu VM** on **Proxmox VE** and automatically installs:
-
-- 🟢 **Node.js** (from NodeSource, or a usable one already on the image — validated by a capability probe, not a version number)
-- 🦞 **OpenClaw** ([openclaw/openclaw](https://github.com/openclaw/openclaw)) — the personal AI assistant, at `latest` or a version you pin
-- 🔐 SSH access for a customizable user (default: `openclaw`)
-- ⏱️ **systemd lingering**, so the gateway daemon survives logout and starts at boot
-- 🎟️ A pre-generated gateway auth token (created *inside* the VM, never in host logs)
-- 📦 Cloud-init provisioning + QEMU Guest Agent
-- 📝 Logging, status reporting, and error handling
-
-**No template VM required** — the script downloads the official Ubuntu Cloud Image and builds everything from scratch.
-
-> **Onboarding is deliberately NOT automated.** No LLM API key is ever handled by this script, so no secret can land in the Proxmox host log. The script finishes by printing the exact commands to complete setup over SSH.
-
----
-
-## ⚠️ Status
-
-**Run end to end on real Proxmox VE hardware (PVE 7), including onboarding.** In July 2026, against `openclaw 2026.7.1-2`, a full run on a `local-lvm` + directory-snippet-storage node completed: disk import/resize on thin-LVM, cloud-init, Node v26.5.1, gateway token generated, provisioning confirmed via QEMU Guest Agent — exit 0. Onboarding was then completed interactively (LLM provider, messaging channel, web search), the gateway daemon was enabled and started as a systemd user service, and the Control UI was reached successfully through an SSH tunnel. Everything in [After the Script Finishes](#-after-the-script-finishes) is written from that run, including the Control UI secure-context problem in step 4 — which is documented here because it was hit for real, not anticipated.
-
-**Re-confirmed on hardware at v1.4.0** (September 2026, same PVE 7 node). A clean run provisioned Node v26.8.1 and OpenClaw 2026.9.2 end to end — disk import and resize on thin-LVM, snippet storage on a *different* storage than the VM disk, cloud-init, DHCP IP detection, and QGA-confirmed provisioning — exit 0. That covers everything added since v1.2.1: the `--openclaw-version` plumbing, the rewritten post-install instructions, the exit-code normalization, and the new preflight advisories. Onboarding itself has not been re-run since July.
-
-**A live compatibility check five days later (v1.4.5) found OpenClaw had tightened its Node requirement inside a patch release** — 2026.9.2 → 2026.9.3 dropped Node 22 and 25 support entirely and raised the Node 24/26 floors, with no announcement. `npm install` does not enforce this (`engine-strict` is off by default), so the install itself doesn't fail — only OpenClaw's own runtime guard does, when you try to run it. This script's default was Node 26 at the time; as of v1.5.0 it is Node 24, matching OpenClaw's own installer, which provisions the LTS line on Linux specifically so a fresh install never receives a prerelease runtime. `--node 22` and `--node 25` do not clear it for `--openclaw-version latest`. The script no longer trusts a successful `npm install` — see the [Fixed](CHANGELOG.md#145---2026-09-10) entry for what changed.
-
-**Three days after that (v1.4.6), the same drift check found the v1.4.5 fix itself needed a fix.** OpenClaw 2026.9.4 added a "diagnostic exemption" that lets `openclaw --version` print a real version and exit 0 on a Node it does not actually support — verified live on an isolated Node 22 with no other Node reachable to recover to: `--version` succeeded while `openclaw onboard` genuinely failed with a real Node/OpenClaw incompatibility (`node:sqlite truncates TEXT at embedded NUL`). The v1.4.5 check alone would have missed this. The script now also checks for OpenClaw's own "unsupported Node" warning, which is still written to stderr even on that exit-0 path. Testing this also caught a real regression in the v1.4.5-era code before it shipped further: a bare version check with no output at all (a fully broken install) hit a `pipefail` edge case that aborted the provisioning script silently, with no `.fail` file and no message — fixed in the same pass.
-
-**v1.6.0 adds runtime detection and an opt-in Bun-hosted gateway, and has not been run on Proxmox hardware.** It was verified instead by extracting the shipped guest code and running it across a 13-scenario matrix in a Node-free sandbox (only `apt-get` and `curl` stubbed), and by installing a gateway under Bun on a live systemd user session, where it ran and answered its RPC probe. That testing also turned up two dormant bugs present since v1.0 — see the [changelog](CHANGELOG.md#160---2026-09-16).
-
----
-
-## 🧩 One-liner Install
-
-Run this directly on any **Proxmox VE node** as **root**:
+Created by **Wesley Faulkner** · Current release: [v1.6.0](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.6.0) · [Changelog](CHANGELOG.md)
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/wesley83/proxmox-openclaw-vm/main/openclaw-vm.sh)"
 ```
 
-Pass flags after `--`:
+> **Two things to know before your first run:**
+> 1. Enable **Snippets** on a Proxmox storage first — [how](#enable-snippets-once).
+> 2. The Control UI will **never** load at `http://<vm-ip>:18789`, even with the right token — [use one of these instead](#4-open-the-control-ui).
+
+**Contents:** [What you get](#what-you-get) · [Requirements](#requirements) · [Install](#install) · [Options](#options) · [After the script finishes](#after-the-script-finishes) · [Everyday commands](#everyday-commands) · [Troubleshooting](#troubleshooting) · [Security](#security) · [Reference](#reference)
+
+---
+
+## What you get
+
+- An **Ubuntu VM** built from the official cloud image (latest LTS): 8 GB RAM, 4 cores, 40 GB disk and 2 GB swap by default
+- **Node.js 24** (LTS) from NodeSource — or a working Node already on the image
+- **OpenClaw**, latest or a version you pin
+- A user account (`openclaw`) that accepts your Proxmox node's SSH key, with systemd lingering so the gateway keeps running after you log out and after reboots
+- A random **gateway token**, generated inside the VM
+- Build tools (`build-essential`, `python3`, `cmake`) for OpenClaw's native modules
+- Progress reporting through the QEMU Guest Agent, and a full log on the host
+
+**Setup of your AI provider and chat apps is left to you, on purpose.** No API key or account login ever passes through the Proxmox host or its logs.
+
+Tested end to end on Proxmox VE 7. The `--runtime bun` option has not yet been tested on real hardware.
+
+---
+
+## Requirements
+
+| You need | Details |
+|---|---|
+| Proxmox VE 7, 8 or 9 | Run the script on the node itself, as `root` |
+| Snippets enabled on a storage | One-time setting — [see below](#enable-snippets-once) |
+| An SSH key on the node | `/root/.ssh/id_ed25519.pub` or `id_rsa.pub`, or pass `--ssh-key` |
+| ~10 GB free on the VM storage | Setup uses about 5 GB. The script warns you before it starts if space is tight |
+| ~2 GB free in `/tmp` on the node | The Ubuntu image downloads here first. Set `TMPDIR=/other/path` to use somewhere else |
+| Free RAM for the VM | 8 GB by default |
+| Internet access | **Node:** `cloud-images.ubuntu.com`, `api.launchpad.net`. **VM:** Ubuntu's apt mirrors, `deb.nodesource.com`, the npm registry — plus `bun.sh` and `github.com` with `--runtime bun` |
+
+If a firewall blocks the VM from Ubuntu's apt mirrors, setup fails *and* the script can't report progress, because the guest agent is installed from apt.
+
+### Enable Snippets (once)
+
+In the Proxmox web UI: **Datacenter → Storage → select `local` → Edit → Content → add `Snippets` → OK.**
+
+This is the most common reason a first run fails right away.
+
+---
+
+## Install
+
+Run on the Proxmox node as `root`:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/wesley83/proxmox-openclaw-vm/main/openclaw-vm.sh)"
+```
+
+To pass options, add them after `--`:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/wesley83/proxmox-openclaw-vm/main/openclaw-vm.sh)" -- --memory 16384 --cores 8
 ```
 
-Or clone and run locally — recommended for a first run, since `--debug` output goes to the log:
+Or clone the repo and run it locally:
 
 ```bash
 git clone https://github.com/wesley83/proxmox-openclaw-vm.git
 cd proxmox-openclaw-vm
-bash openclaw-vm.sh --debug
+bash openclaw-vm.sh
 ```
 
-The script will:
+The script:
 
-- Detect storage, snippet storage, bridge, SSH keys, and the next free VMID
-- Download and verify the Ubuntu cloud image
-- Create the VM, import and resize the disk
-- Provision Node.js + OpenClaw via cloud-init
-- Poll provisioning status via the QEMU Guest Agent
-- Print your onboarding instructions
+1. Picks the storage, network bridge, SSH key and next free VM ID
+2. Downloads and verifies the Ubuntu cloud image
+3. Creates the VM and sets up its disk
+4. Installs Node.js and OpenClaw inside the VM
+5. Waits for that to finish (up to about 17 minutes), then prints your next steps
 
 ---
 
-## 🧰 Requirements
+## Options
 
-| Requirement | Description |
-|------------|-------------|
-| Proxmox VE 7/8/9 | Runs directly on a node (not inside a VM) |
-| Snippets storage | A storage with **Snippets** content enabled *(once only — see below)* |
-| SSH key | `/root/.ssh/id_ed25519.pub` or `id_rsa.pub` **on the Proxmox node** (or pass `--ssh-key`). This is the node's own key, not your desktop's — see the note below |
-| `qm`, `pvesh`, `pvesm`, `curl`, `qemu-img`, `ip`, `awk` | Pre-installed on Proxmox; verified by the script |
-| Free space | ~10 G on the target storage. Provisioning writes roughly 5 G (cloud image + apt + Node + OpenClaw); the rest is headroom for the npm cache, logs, and state. The script warns before downloading anything if the storage reports less |
-| Staging space | ~2 G free in `/tmp` on the node — the cloud image is downloaded there before import. Set `TMPDIR=/path` to stage it elsewhere if `/` is a small LV |
-| Host RAM | Enough free memory for `--memory` (default `8192` MB). Overcommit is allowed and only warned about, but a VM the node cannot fit will fail to start |
-| `python3` | Optional but recommended — used for JSON parsing, with fallbacks throughout |
-| Network access | `cloud-images.ubuntu.com` and `api.launchpad.net` (host); `archive.ubuntu.com`/`security.ubuntu.com` or your apt mirror, `deb.nodesource.com`, and the npm registry (guest) — plus `bun.sh` and `github.com` (release downloads) with `--runtime bun`. On an egress-filtered network, blocking the apt mirrors fails provisioning *and* blanks QGA status polling, since `qemu-guest-agent` is one of the apt packages |
+| Option | What it does | Default |
+|---|---|---|
+| `-m`, `--memory <MB>` | RAM. Minimum `2048`; warns below `4096` | `8192` |
+| `-c`, `--cores <N>` | CPU cores. Warns if the node has fewer | `4` |
+| `-d`, `--disk <SIZE>` | Disk size with a unit, like `40G`. Minimum `8G`; warns below `20G` | `40G` |
+| `-s`, `--swap <SIZE>` | Swap file size, or `0` for none | `2G` |
+| `-u`, `--ubuntu <codename>` | Ubuntu release, like `noble` or `resolute` | Latest LTS |
+| `-n`, `--node <major>` | Node.js version: `24` or `26`. (`22` and `25` are accepted but only work with an older `--openclaw-version`) | `24` |
+| `--openclaw-version <v>` | OpenClaw version or npm tag. Pin one for repeatable builds | `latest` |
+| `--runtime <auto\|node\|bun>` | What runs the gateway — see [Node and Bun](#node-and-bun) | `auto` |
+| `--user <name>` | VM username | `openclaw` |
+| `--storage <id>` | Storage for the VM disk — see [How storage is chosen](#how-storage-is-chosen) | Automatic |
+| `--snippet-storage <id>` | Storage for the cloud-init snippet | First with Snippets enabled |
+| `--ssh-key <path>` | Public key file (`.pub`). It can hold several keys, one per line | The node's root key |
+| `--debug` | Print every command as it runs | Off |
+| `-h`, `--help` | Show help | — |
+
+Examples:
+
+```bash
+# A bigger VM on a specific storage
+bash openclaw-vm.sh --memory 16384 --cores 8 --disk 80G --storage local-zfs
+
+# Pin OpenClaw for a repeatable build
+bash openclaw-vm.sh --openclaw-version 2026.9.4
+```
 
 ### How storage is chosen
 
-Two storages matter: one holds the **VM disk**, one holds the **cloud-init snippet**. Both auto-detect, and both can be set explicitly with `--storage` and `--snippet-storage`.
+The script prefers `local-lvm`, otherwise the first storage that can hold VM disks. If that storage has less than about 10 GB free and another has room:
 
-Auto-selection prefers `local-lvm`, falling back to the first active storage with `images` content. As of v1.4.0 it also considers **free space** — a storage that is active but full is no longer chosen blindly:
+- **At a terminal**, it lists the storages with room and asks which to use. Press Enter to keep the original choice.
+- **Without a terminal** (cron, CI), it switches to the storage with the most room and tells you.
+- **If you passed `--storage`**, it always uses exactly that storage.
 
-- **You're at a terminal** → it lists the storages that have room and asks which to use. Press Enter to keep the original choice. Anything unrecognized also keeps the original, so a stray keystroke can't silently relocate your VM.
-- **No terminal** (cron, CI, a piped run) → it switches to the roomiest storage that fits and says so loudly, naming the flag to override it.
-- **You passed `--storage` explicitly** → it is honored exactly as given. An explicit choice is never second-guessed; you only get a warning if it looks tight.
+### Node and Bun
 
-The prompt works with the documented one-liner because `bash -c "$(curl ...)"` passes the script as an *argument*, leaving stdin free. (The more common `curl | bash` makes the script itself stdin, which is why prompting is impossible there.)
+OpenClaw needs Node.js in every case, so the script always installs it — or reuses a working copy already on the image. `--runtime` only decides what runs the **gateway service**:
 
-Nothing is destroyed either way — this only affects where a *new* disk is created.
-
-### How the JavaScript runtime is chosen
-
-OpenClaw is a Node.js application, and **Node is required in every mode** — including `--runtime bun`. That was verified against OpenClaw 2026.9.4 on a machine with no Node at all, not assumed:
-
-- `bun add -g --trust openclaw` fails inside OpenClaw's own preinstall, which looks for a real `node` on `PATH` and refuses without one.
-- Without `--trust` the install succeeds, but OpenClaw records its lifecycle steps as pending and replays that same check the first time it runs. So `bun openclaw.mjs` and `bun run --bun openclaw` — the two forms OpenClaw's docs give for Bun — fail too.
-
-Bun can *host the gateway*; it cannot *replace* Node. `--runtime` chooses what the gateway runs on:
-
-| `--runtime` | Node | Gateway runs on |
-|---|---|---|
-| `auto` (default) | Reuses a usable Node already on the image; otherwise installs Node from NodeSource | Bun if a usable Bun was **already** present, otherwise Node |
-| `node` | Same as `auto` | Always Node |
-| `bun` | Same as `auto` | Bun — installed if not already present |
-
-"Usable" means passing the same capability probe used throughout: `node:sqlite` present, a WAL-reset-safe SQLite build, and embedded NUL bytes surviving a round trip through TEXT, BLOB and JSON columns. A runtime that fails it is never used, whatever its version number says.
-
-On a fresh Ubuntu cloud image, `auto` always installs Node and runs the gateway on it — the `resolute` and `noble` images ship no JavaScript runtime at all (checked against their package manifests). Detection only changes anything on a customized image. An explicit `--node <major>` is never swapped for a different Node already on the image.
-
-**Why Node stays the default.** OpenClaw's own docs describe Node as its primary, recommended runtime, and warn that Bun 1.4.2 can keep SQLite handles and WAL files open after close — advising Node "when prompt file release matters." For an always-on assistant that stores conversations, that is a reasonable default.
-
-When the gateway will run on Bun, the summary prints the onboarding command with `--daemon-runtime bun` added. The `openclaw` command itself still runs on Node.
-
-### Enable Snippets (Required Once)
-
-Proxmox GUI →
-**Datacenter → Storage → local → Edit → Check `Snippets` → Save**
-
-This is the most common reason a first run fails immediately.
-
----
-
-## ⚙️ Options
-
-| Flag | Meaning | Default |
-|------|---------|---------|
-| `-m`, `--memory <MB>` | VM RAM. Minimum `2048`, warns below `4096` | `8192` |
-| `-c`, `--cores <N>` | CPU cores (≥ 1). Warns if it exceeds the node's CPU threads | `4` |
-| `-d`, `--disk <SIZE>` | Disk size with suffix. Minimum `8G`, warns below `20G`; must also exceed the image's ~3.5 GiB virtual size, since `qm resize` cannot shrink | `40G` |
-| `-s`, `--swap <SIZE>` | Swapfile size, or `0` to disable. Cloud images ship with **no swap** | `2G` |
-| `-u`, `--ubuntu <codename>` | Ubuntu codename (`resolute`, `noble`, `jammy`, …) | latest active LTS (auto-detected; falls back to `noble`) |
-| `-n`, `--node <major>` | Node.js major version. Defaults to the **LTS** line, matching OpenClaw's own installer — NodeSource ships the newest patch of whatever major you ask for, and Node 26 is the Current line (LTS in Oct 2026), so defaulting to 26 can hand a fresh VM a prerelease runtime | `24` (supported: `22 24 25 26`) |
-| `--openclaw-version <v>` | OpenClaw npm version or dist-tag. Pin it (e.g. `2026.9.1`) for reproducible builds — OpenClaw ships often and `latest` means two VMs built months apart get different software. Not validated against the registry, so a typo only surfaces once the VM is up | `latest` |
-| `--runtime <auto\|node\|bun>` | Which JavaScript runtime hosts the gateway. **Node is installed or reused in every mode — OpenClaw cannot run without it** ([why](#how-the-javascript-runtime-is-chosen)). `auto` reuses a usable Node already on the image, and runs the gateway on Bun only if a usable Bun was already there. `bun` installs Bun and runs the gateway on it. `node` never uses Bun | `auto` |
-| `--user <name>` | VM username (lowercase, starts with a–z or `_`, ≤ 32 chars) | `openclaw` |
-| `--storage <id>` | Proxmox storage for the VM disk. An explicit value is always honored as-is; auto-selection skips a storage without room (see below) | `local-lvm` if present, else first active storage with `images` content |
-| `--snippet-storage <id>` | Proxmox storage for the cloud-init snippet | first storage with `snippets` content |
-| `--ssh-key <path>` | SSH public key file (must end in `.pub`; multiple keys supported) | `/root/.ssh/id_ed25519.pub` (or `id_rsa.pub`) |
-| `--debug` | Enable bash debug tracing (`set -x`) | off |
-| `-h`, `--help` | Show help and exit | — |
-
-### Example
-
-```bash
-bash openclaw-vm.sh --memory 16384 --cores 8 --disk 80G --node 24 --user assistant
-```
-
-Or pin OpenClaw for a reproducible build:
-
-```bash
-bash openclaw-vm.sh --openclaw-version 2026.9.1
-```
-
----
-
-## 🔐 Default VM Configuration
-
-| Setting | Value |
-|---------|-------|
-| OS | Ubuntu Cloud Image (latest LTS, auto-detected) |
-| User | `openclaw` (customizable via `--user`), passwordless sudo |
-| Auth | Your root SSH public key; random initial console password printed in the summary |
-| Hostname | `openclaw-<VMID>` (also what appears in DHCP leases) |
-| Network | DHCP via `vmbr0` (or first available bridge) |
-| CPU / Machine | `host` / `q35` |
-| Autostart | `--onboot 1` — this is an always-on assistant |
-| Guest Agent | Installed and started (used for status polling and IP detection) |
-| Node.js | Node 24 (LTS) from NodeSource, or a usable Node already on the image; validated by a runtime capability probe, not a version number |
-| Gateway runtime | Node by default. Bun with `--runtime bun`, or under `auto` when a usable Bun is already present; Bun is installed to `/opt/bun` and linked as `/usr/local/bin/bun` |
-| Build toolchain | `build-essential python3 cmake` — matches what OpenClaw's own `install.sh` installs on Debian/Ubuntu |
-| OpenClaw | `npm install -g openclaw@latest` — pin a version with `--openclaw-version` |
-| Gateway port | `18789` (not yet listening — set during onboarding) |
-
-### Why `cmake` is pre-installed
-
-OpenClaw's main native dependencies (`@lydell/node-pty`, `sqlite-vec`) ship per-platform **prebuilt** binaries, so a normal install compiles nothing. But when a prebuild is missing for the running Node ABI or architecture, npm falls back to building from source, which needs `cmake`.
-
-Upstream's `install.sh` handles this two ways: it installs `build-essential python3 make g++ cmake` unconditionally on Linux, *and* it greps failed npm logs for `cmake: command not found` / `Failed to build llama.cpp` to install the toolchain and retry. This script calls `npm` directly rather than going through `install.sh`, so it gets neither remedy — pre-installing the toolchain is what keeps that fallback from becoming an unrecoverable provisioning failure.
-
-### Resource sizing
-
-Measured footprint, so you can size deliberately rather than guess:
-
-| Component | Disk |
+| `--runtime` | Gateway runs on |
 |---|---|
-| Ubuntu cloud image, booted | ~2.2 G |
-| apt packages, all 10 incl. `build-essential` + `cmake` toolchain (**measured**, unchanged as of OpenClaw 2026.9.1) | 645 M |
-| Node.js (NodeSource) + OpenClaw incl. dependency trees and npm cache (**measured on 2026.7.1-2** — see the row below; treat this as a floor, not a current figure) | 778 M |
-| OpenClaw's own installed package alone (**measured on 2026.9.1**) — it roughly doubled since 2026.7.1-2, which is what makes the row above understated | 520 M |
-| **With headroom for logs, state, and updates** | **~5 G is still a comfortable planning number** — the `20G`+ recommendation absorbs this growth easily |
+| `auto` (default) | Node — or Bun, if a working Bun is already on the image |
+| `node` | Node |
+| `bun` | Bun, installed to `/opt/bun` if needed |
 
-OpenClaw's footprint has grown fast between releases, so treat these as a floor and re-measure if you are sizing tightly. Pinning `--openclaw-version` keeps a given VM's footprint predictable.
+"Working" means the runtime passes a quick check of its built-in SQLite support — the same check OpenClaw's own installer uses. A fresh Ubuntu image has neither Node nor Bun, so there `auto` simply installs Node.
 
-Hence the `8G` hard floor and `20G` warning. The `40G` default leaves room for logs, state, conversation history, and a browser later.
-
-**Swap:** Ubuntu cloud images ship with **zero** swap, which makes a memory spike an instant OOM-kill rather than a slowdown. The script adds a `2G` swapfile via cloud-init's `mounts` module. Ordering was verified against the real module list: `growpart` → `resizefs` → `mounts` all run in the `cloud_init` stage, *before* `package_update_upgrade_install` and `runcmd` in `cloud_final` — so the disk is already grown and swap is already active during the apt and npm installs, which are the actual memory spikes. Disable with `--swap 0`.
-
-**Disk growth** is automatic: `growpart` and `resizefs` are image-level cloud-init modules, so they still run even though `--cicustom` replaces the user-data.
-
-### Browser automation is *not* included
-
-Nothing here downloads a browser. `openclaw` depends on `playwright-core`, which does **not** fetch Chromium at install time, and upstream's `install.sh` contains no browser handling at all. If you enable browser automation later, budget for installing a browser and its system libraries yourself — the default `40G` disk and `8192` MB RAM leave headroom for it.
+Node is the default because it's OpenClaw's recommended runtime; OpenClaw's docs note that Bun can hold database files open longer. When the gateway will run on Bun, the onboarding command the script prints includes `--daemon-runtime bun`.
 
 ---
 
-## 🏁 After the Script Finishes
+## After the script finishes
 
-The script installs OpenClaw but does **not** onboard it. Finish over SSH:
+The script's summary shows your VM's IP address, a one-time console password, and the steps below with your details filled in.
 
 ### 1. Log in
 
-Two routes. Both land you at the same shell, and steps 2–3 are identical either way.
+Use either:
 
-**A — SSH**, from a machine whose key is on the VM:
+- **The Proxmox console** — always works. In the Proxmox web UI, select the VM → **Console**, and log in as `openclaw` with the console password from the summary.
+- **SSH from the Proxmox node** — `ssh openclaw@<vm-ip>`
 
-```bash
-ssh <user>@<vm-ip>
-```
+On first login you must choose a new password. When it asks for your "current" password, enter the console password.
 
-> **That means the Proxmox node, not your desktop** — the embedded key is `/root/.ssh/id_ed25519.pub` (or `id_rsa.pub`) **on the node**, so only the node's own key is authorized. From anywhere else this fails with `Permission denied (publickey)` before any password prompt appears. **Password SSH is disabled** on Ubuntu cloud images and this script doesn't enable it, so there is no password fallback — the key is the only way in over SSH.
-
-**B — The Proxmox console**, which needs no key at all: **Datacenter → your node → the VM → Console**. Log in with the username and the random console password from the summary. This always works, including from a machine that has never touched the VM, so it's the reliable option if SSH refuses you.
-
-> **First login forces a password change** on either route. The console password from the summary is what PAM asks for as the "current" password — even over SSH key auth.
-
-**To use SSH from your own machine afterwards**, append its public key from a shell on the VM (the console is fine for this):
+Only the Proxmox node's SSH key is installed, and password login over SSH is turned off. So SSH from your own computer fails with `Permission denied (publickey)` until you add that computer's key. From a shell in the VM:
 
 ```bash
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
-echo '<paste your public key>' >> ~/.ssh/authorized_keys
+echo '<your public key>' >> ~/.ssh/authorized_keys
 ```
 
-You'll want this before step 4 regardless: the Control UI tunnel runs on the machine with the browser, and it needs that machine's key here. Alternatively, re-run the script with `--ssh-key` pointing at a file containing both keys, one per line.
+You'll need this for step 4. (Or re-run the script with `--ssh-key` pointing at a file containing both keys.)
 
-### 2. Onboard
+### 2. Set up OpenClaw
 
 ```bash
 openclaw onboard --install-daemon --gateway-token "$(cat ~/.openclaw/gateway-token)"
 ```
 
-If the script's summary shows `gateway=bun`, it prints this command with `--daemon-runtime bun` added — use it exactly as the summary gives it. See [How the JavaScript runtime is chosen](#how-the-javascript-runtime-is-chosen).
+If the summary shows `gateway=bun`, copy the command from the summary instead — it adds `--daemon-runtime bun`.
 
-This one command runs an interactive wizard with several prompts. Expect, roughly in this order:
+The wizard walks you through:
 
-> The wizard's exact prompts and wording change between OpenClaw releases. What follows describes its **shape** as of 2026.9.1, not a screen-by-screen script — if your version asks something different, answer it and carry on.
+1. **A security notice** — press Enter to accept.
+2. **Your AI provider** — paste an API key, *or* sign in with a subscription you already have. ChatGPT, GitHub Copilot and others are supported, so you don't need a pay-as-you-go API key.
+3. **A messaging app** to talk to your assistant — Telegram, WhatsApp, Slack, Discord and more.
+4. **A web search provider.**
+5. **A first chat** in the terminal, where your assistant introduces itself. Reply, or press **Ctrl+C** to leave. To skip it entirely, add `--skip-ui` to the command.
 
-**a. A security disclaimer** you must accept before anything else happens. It summarizes the personal-agent trust model and asks `Continue?`, with `Yes` preselected — press **Enter**. This is a single-operator VM you provisioned yourself, so the default posture applies; choosing `No` exits without configuring anything.
+The exact prompts change between OpenClaw versions — answer whatever it asks.
 
-**b. LLM provider selection and auth** — OpenAI, Anthropic, xAI, Google, OpenRouter, or others.
-
-You do **not** need a pay-as-you-go API key. Alongside API-key entry, OpenClaw supports OAuth sign-in against an existing subscription — ChatGPT, GitHub Copilot, Qwen, MiniMax, xAI and others each have a device-code or OAuth choice. Verified on 2026.9.2: signing in with ChatGPT is a first-class path, and some models are *only* reachable that way. Upstream's own wording on one of them:
-
-> `gpt-5.3-codex-spark` is available only through ChatGPT/Codex OAuth ... OpenAI API-key auth cannot use this model.
-
-If you skipped auth during onboarding, or want to add or switch later:
+To add or change your AI sign-in later:
 
 ```bash
-openclaw models auth login --provider openai   # OAuth / device-code sign-in
-openclaw models auth list                      # what's currently saved
+openclaw models auth login --provider openai
+openclaw models auth list
 ```
 
-**c. Messaging channel selection** — Telegram, WhatsApp, Slack, Discord, etc. Pick whichever you'll actually talk to the agent through; none is required by this script.
-
-**d. Web search provider selection**, after which workspace/Gateway/session setup runs automatically.
-
-**e. A first-chat session.** OpenClaw's docs describe this as opening the Control UI in a browser (or printing its URL on headless systems) — but on a VM with no browser installed, it drops into a local terminal chat instead, with the freshly-created agent introducing itself and asking to be named. That's the `--tui` path ("the terminal hatch"), and on a headless VM it's what you get.
-
-This step is cosmetic, not structural — your provider, channel, and web-search choices are already saved by this point, and per OpenClaw's docs "workspace and Gateway settings remain untouched" by it. Three ways past it:
-
-- **Skip it up front (cleanest).** Add `--skip-ui` to the onboard command above and this step never runs.
-
-- **Answer it and move on.** Type anything and press Enter — e.g. *"Surprise me — pick a name, creature, and emoji you like. Keep it short."* It may reply once or twice more.
-
-- **Bail out.** Press **Ctrl+C** (or Ctrl+D) to return to the shell. If you're in the Proxmox web console and it doesn't respond, click into the terminal pane first so it has focus.
-
-Either way, you end up back at a shell prompt, ready for step 3.
-
-> **About the token.** On **2026.9.1 and 2026.9.2** this works as written: re-verified live on both (non-interactive) that `--gateway-token` lands in `gateway.auth.token` exactly as passed, with `mode: token` and `bind: loopback`. On **2026.7.1-2** it did **not** — the default onboarding flow silently ignored both `--gateway-token` and `--gateway-bind`, minting its own token instead. That matters if you pinned an older release with `--openclaw-version`, since pinning back reintroduces the bug.
->
-> Either way, the value that actually counts afterward is `gateway.auth.token` in `~/.openclaw/openclaw.json` — not the file. Step 3 shows you how to check which one is live and how to force them into sync if they disagree.
->
-> Don't pass `--gateway-bind` here even though it now works: step 4 keeps the gateway on `loopback`, which is what the Control UI's secure-context requirement needs.
-
 ### 3. Start the gateway
-
-Everything up to this point has only *installed and configured* OpenClaw — nothing is actually listening yet. The Control UI and gateway API don't exist as a running process until this step. Run it after the onboarding wizard above has returned control of the terminal (exit the first-chat session first if you're still in it):
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
@@ -308,87 +194,75 @@ systemctl --user enable --now openclaw-gateway.service
 openclaw gateway status --require-rpc
 ```
 
-What each line does, and why it matters:
+- The first line lets `systemctl --user` find your session. Without it you'll see `Failed to connect to bus`.
+- The second starts the gateway now and on every boot. It keeps running after you log out.
+- The third confirms the gateway is running and accepts your token.
 
-- **`export XDG_RUNTIME_DIR=/run/user/$(id -u)`** — `systemctl --user` needs to know where your personal systemd instance and its D-Bus session socket live, normally `/run/user/<your-numeric-uid>`. A full desktop login sets this automatically; an SSH or console session — especially right after first boot — often doesn't. `id -u` looks up your UID (for the `openclaw` user) so this works regardless of what number it actually is. Skip it and the next line typically fails with something like `Failed to connect to bus: No such file or directory`.
-
-- **`systemctl --user enable --now openclaw-gateway.service`** — `--install-daemon` (back in step 2) only created the *unit file*; this is what actually runs it. `enable` registers it to start automatically on every future boot; `--now` also starts it immediately, in this session, without waiting for a reboot. Combined with the systemd lingering the provisioning script already turned on for this user, this is what makes OpenClaw an always-on service — running now, and still running after you log out, reboot the VM, or it crashes and gets restarted — rather than something tied to your SSH session staying open.
-
-- **`openclaw gateway status --require-rpc`** — a read-only check: confirms the systemd unit is actually active, and does a connectivity/auth probe against the gateway's WebSocket port to verify your token is recognized. This is what tells you the previous line actually worked, before you go looking for the Control UI in a browser and wonder why it won't load. `--require-rpc` makes it **exit non-zero when that probe fails**, instead of printing a problem and still returning success — so it works in a `&&` chain or a script. Add `--json` if you want to parse it.
-
-**Then confirm your known token is the one actually configured** (see the note in step 2 — this matters on some OpenClaw versions, not others, so just always check). On 2026.9.1+ you can simply look:
+Then check the gateway is using your token. These two should print the same value:
 
 ```bash
 openclaw gateway auth-token --show
+cat ~/.openclaw/gateway-token
 ```
 
-That prints the token the gateway is actually using — compare it to `cat ~/.openclaw/gateway-token`. It only prints to an interactive terminal, so it won't leak into a pipe or a log. If they don't match, or your version doesn't have that command, force them into sync:
+If they differ:
 
 ```bash
 openclaw config set gateway.auth.token "$(cat ~/.openclaw/gateway-token)"
 openclaw gateway restart
-openclaw gateway status --require-rpc
 ```
 
-Both are safe and idempotent. OpenClaw also ships its own repair for a missing or broken token — `openclaw doctor --fix --generate-gateway-token` — but note that **generates a new token** rather than adopting the one in your file, so prefer the `config set` line above if you want the file to stay authoritative.
+### 4. Open the Control UI
 
-Use `gateway restart`, not a `gateway stop` + `gateway start` chain — OpenClaw's docs explicitly warn against substituting one for the other. Leave `bind` on its `loopback` default: as the next step explains, opening the port to the LAN doesn't get a browser into the Control UI anyway, and every recommended access path works with loopback.
+**`http://<vm-ip>:18789` will not work, even with the correct token.** The Control UI needs a secure browser connection — HTTPS or `localhost` — so a plain-HTTP IP address is always refused. It looks like this:
 
-### 4. Access the Control UI
+![OpenClaw Control UI showing "Could not connect" when opened over plain HTTP at a LAN IP address, even with a correct token](img/control-ui-wrong-way.png)
 
-**You cannot browse to `http://<vm-ip>:18789` — by design, not misconfiguration.** The Control UI creates a cryptographic *device identity* in your browser, which requires a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) — **HTTPS or localhost**. Plain HTTP to a LAN IP is neither, so the gateway rejects the WebSocket no matter how correct your token is. This is exactly what that failure looks like — a valid, masked token entered correctly, same "Could not connect" every time:
+Pick one of these instead:
 
-![OpenClaw Control UI "Could not connect" error, caused by browsing to a LAN IP over plain HTTP instead of a secure context — happens with a completely correct token](img/control-ui-wrong-way.png)
+| Option | Good for | You need |
+|---|---|---|
+| [A. SSH tunnel](#a-ssh-tunnel) | Getting started | Nothing extra |
+| [B. Tailscale Serve](#b-tailscale-serve) | Private access from all your devices | A Tailscale account |
+| [C. Cloudflare Tunnel](#c-cloudflare-tunnel) | Access from anywhere on your own domain | A Cloudflare account and domain |
+| [D. nginx with HTTPS](#d-nginx-with-https) | A permanent address on your home network | Nothing extra |
 
-The three numbered hints in that box are generic and won't fix this specific case (the URL/transport and token are already right) — the real cause only shows up in the "Raw error" expander or the server log; see Troubleshooting. Skip straight to one of these instead:
+#### A. SSH tunnel
 
-#### Option A — SSH tunnel (zero extra software; start here)
-
-**Run this on the machine whose browser you'll use** — not on the VM, and not in the Proxmox console. It needs that machine's key in the VM's `authorized_keys` (see step 1 if you logged in via the console and haven't added it yet):
+On the computer whose browser you'll use — **not** in the VM:
 
 ```bash
-ssh -N -L 18789:127.0.0.1:18789 <user>@<vm-ip>
+ssh -N -L 18789:127.0.0.1:18789 openclaw@<vm-ip>
 ```
 
-Leave that running — no output is normal — then open **`http://localhost:18789/`** and paste the token from `~/.openclaw/gateway-token` into the Gateway Token field, or append it: `http://localhost:18789/#token=<token>`. `localhost` is a secure context, so this works over plain HTTP.
+Leave it running (it prints nothing), then open **http://localhost:18789/** and enter your gateway token. This needs your computer's SSH key on the VM ([step 1](#1-log-in)).
 
-**Two commands that save guessing:**
+Tip: in the VM, `openclaw dashboard --no-open` prints the full link with your token already in it.
 
-```bash
-openclaw dashboard --no-open              # on the VM: prints the URL, token included
-openclaw gateway probe --ssh <user>@<vm-ip>   # from your machine: tests the tunnel
-```
+#### B. Tailscale Serve
 
-`dashboard --no-open` builds the Control UI URL with the live token so you don't assemble a `#token=` fragment by hand (`--no-open` stops it launching a browser the VM doesn't have; `--json` returns the parts separately). Copy it over, swapping the host for `localhost` while the tunnel is up.
-
-`gateway probe --ssh` reports reachability *and* whether auth was accepted — which is the difference between "my tunnel is broken" and "my token is wrong", two failures that look identical in the browser.
-
-#### Option B — Tailscale Serve (HTTPS inside your tailnet, no port exposure)
-
-This is the method OpenClaw's own docs recommend. [Install Tailscale](https://tailscale.com/download/linux) in the VM (`tailscale up`), then:
+OpenClaw's own recommended option. [Install Tailscale](https://tailscale.com/download/linux) in the VM and run `sudo tailscale up`. Then:
 
 ```bash
 openclaw config set gateway.tailscale.mode serve
 openclaw gateway restart
 ```
 
-The gateway stays on loopback; Tailscale terminates HTTPS and serves it at `https://<vm-magicdns-name>/` to your tailnet only. Any device on your tailnet gets the Control UI with a valid secure context and no tunnel commands.
+Open `https://<vm-name>.<your-tailnet>.ts.net/` from any device on your tailnet. Nothing is exposed outside it.
 
-#### Option C — Cloudflare Tunnel (HTTPS on your own domain)
+#### C. Cloudflare Tunnel
 
-> Not covered by OpenClaw's docs — this is standard `cloudflared` practice applied to the gateway, tested against the same loopback + token setup as above.
+1. In the [Cloudflare Zero Trust dashboard](https://one.dash.cloudflare.com), go to **Networks → Tunnels → Create a tunnel**, and run the install command it gives you inside the VM.
+2. Add a **public hostname**, such as `openclaw.example.com`, pointing to `http://localhost:18789`.
+3. Open `https://openclaw.example.com/`.
 
-In the [Cloudflare Zero Trust dashboard](https://one.dash.cloudflare.com): **Networks → Tunnels → Create a tunnel**, name it (e.g. `openclaw`), and copy the connector install command it generates. Run that in the VM — it installs `cloudflared` as a service with the tunnel credentials baked in. Then add a **Public Hostname** to the tunnel: `openclaw.yourdomain.com` → service `http://localhost:18789`.
+**Also protect the hostname with [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/)** (an email code or single sign-on). Otherwise anyone on the internet can reach your gateway, with only the token stopping them.
 
-Browse to `https://openclaw.yourdomain.com/` — HTTPS at Cloudflare's edge satisfies the secure context, `cloudflared` proxies (WebSockets included) to the loopback gateway, and token auth still gates every connection.
+#### D. nginx with HTTPS
 
-**Do not stop at token auth here.** Unlike A and B, this puts the gateway on a public hostname reachable by the whole internet. Put a [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) application in front of the hostname (email OTP or your IdP) so unauthenticated visitors never reach the gateway at all — the token then becomes your second layer, not your only one.
+Gives you a permanent `https://<vm-ip>/` on your network, with nothing to run on each device. Browsers warn once about the self-signed certificate.
 
-#### Option D — nginx + self-signed TLS (one persistent LAN URL, no client-side setup)
-
-> Not covered by OpenClaw's docs or by this script — a standard nginx-as-TLS-terminator pattern applied to the loopback-bound gateway. Unlike A–C, there's nothing to run or keep open on the *client* side: once set up, `https://<vm-ip>/` just works from any device on your LAN, indefinitely. The tradeoff is a one-time "this certificate isn't trusted" browser warning (it's self-signed) and no access-control layer beyond the gateway token — closer in risk profile to `bind=lan` than to Tailscale or Cloudflare Access.
-
-In the VM:
+In the VM, install nginx and create a certificate:
 
 ```bash
 sudo apt-get install -y nginx
@@ -400,7 +274,7 @@ sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
 sudo chmod 600 /etc/nginx/ssl/openclaw.key
 ```
 
-Then write `/etc/nginx/sites-available/openclaw`:
+Create `/etc/nginx/sites-available/openclaw`:
 
 ```nginx
 server {
@@ -424,316 +298,219 @@ server {
 }
 ```
 
+Turn it on:
+
 ```bash
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo ln -sf /etc/nginx/sites-available/openclaw /etc/nginx/sites-enabled/openclaw
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Browse to `https://<vm-ip>/` (accept the self-signed cert warning once), paste the token, connect. The gateway itself never leaves loopback — nginx is what's reachable on the LAN, on 443, not 18789. If you have a real domain pointed at this VM, swap the two `openssl`-generated files for a Let's Encrypt certificate instead (`sudo apt-get install -y certbot python3-certbot-nginx && sudo certbot --nginx`) and lose the browser warning entirely.
+Open `https://<vm-ip>/`, accept the certificate warning, and enter your token. If a real domain points at the VM, `sudo apt-get install -y certbot python3-certbot-nginx && sudo certbot --nginx` replaces the self-signed certificate.
 
-This is a LAN-wide HTTPS port, not a tunnel — apply the same care as `bind=lan`: this script doesn't configure a firewall, so restrict 443 to the hosts that actually need it rather than leaving it open to your whole network.
-
-#### What `bind=lan` is actually for
-
-Only **non-browser** clients: native OpenClaw apps pointing at `ws://<vm-ip>:18789`, or a reverse proxy running on a *different* host. If you need that: `openclaw config set gateway.bind lan && openclaw gateway restart` — the fail-closed token requirement stays in force. It will never make `http://<vm-ip>:18789` work in a browser.
-
-#### Day-to-day references
-
-- **Logs:** `journalctl --user -u openclaw-gateway -f` (file log path shown in `gateway status`)
-- **Config:** `~/.openclaw/openclaw.json`
-- **Status:** `openclaw gateway status --require-rpc`
-- **Health:** `openclaw doctor --lint`
-- **Token:** `openclaw gateway auth-token --show`
+This opens port 443 to your whole network, so use a firewall to limit it to the devices that need it.
 
 ---
 
-## ✅ Post-Install Verification
+## Everyday commands
 
-Run these **on the Proxmox node** — note they use the guest agent, not SSH:
+In the VM:
 
 ```bash
-# 1. VM is running
-qm status <VMID>
+openclaw gateway status --require-rpc     # Is the gateway running and accepting the token?
+openclaw doctor --lint                    # Health check, with suggested fixes
+journalctl --user -u openclaw-gateway -f  # Live gateway logs
+openclaw gateway restart                  # Restart the gateway
+openclaw gateway auth-token --show        # Show the token in use
+openclaw dashboard --no-open              # Print the Control UI link, token included
+```
 
-# 2. Provisioning succeeded (prints installed versions)
-#    This is where you confirm --openclaw-version took effect:
-#    it reports the RESOLVED version, e.g. node=v26.5.1 openclaw=2026.9.1
-qm guest exec <VMID> -- cat /var/log/openclaw-install.ok
+OpenClaw keeps its settings (`openclaw.json`) and data in `~/.openclaw/`, owned by your user — so installing OpenClaw plugins doesn't need `sudo`.
 
-# 3. Full provisioning log
+On the Proxmox node:
+
+```bash
+qm guest exec <VMID> -- cat /var/log/openclaw-install.ok        # Installed Node and OpenClaw versions
 qm guest exec <VMID> -- tail -n 40 /var/log/openclaw-provision.log
-
-# 4. Cloud-init finished cleanly
-qm guest exec <VMID> -- cloud-init status --long
+qm terminal <VMID>                                              # Serial console (Ctrl+O to exit)
+cat /var/log/openclaw-vm-<VMID>.log                             # The script's own log
 ```
 
-### Exit codes
+To remove a VM completely:
 
-| Code | Meaning |
-|------|---------|
-| `0` | Provisioning confirmed OK |
-| `1` | Setup failed before provisioning began (anywhere up through VM start) — the VM, if it existed, is auto-destroyed. The host log always remains, and the cloud-init snippet remains if it was already written |
-| `2` | VM created and **deliberately kept**, but provisioning failed or went unconfirmed |
-| `130` / `143` | Interrupted by SIGINT (Ctrl-C) or SIGTERM. The VM is destroyed unless it had already been kept |
-
-Exit `2` is not a crash. It exists so scripted callers see a non-zero status while the VM survives for inspection.
-
-**These are the only codes the script emits.** Several `qm` calls are intentionally unguarded, and under `set -e` they would otherwise propagate the tool's own status — a full LVM-thin pool makes `qm importdisk` exit `5`, for instance. The cleanup trap normalizes any such status to `1`, or to `2` when the VM was deliberately kept, so a caller branching on `0`/`1`/`2` never sees an unexpected number. (Fixed in v1.3.1; earlier versions could leak a tool's exit code.)
+```bash
+qm stop <VMID> && qm destroy <VMID> --purge
+rm -f <snippet-storage-path>/snippets/openclaw-<VMID>.yaml
+```
 
 ---
 
-## 🐞 Troubleshooting
+## Troubleshooting
 
-### 🩺 Start here: ask OpenClaw what's wrong
+**Start with `openclaw doctor --lint`** in the VM. It lists problems along with the command that fixes each one. Before you've run `openclaw onboard`, it always reports missing authentication and an unset gateway mode — that's expected. For a bug report to OpenClaw, `openclaw gateway diagnostics export` creates a shareable bundle without your conversations.
 
-Once onboarding has run, OpenClaw diagnoses itself better than any checklist. On the VM:
+### "No storage with 'snippets' content found"
 
-```bash
-openclaw doctor --lint
-```
+Enable Snippets on a storage — [see Requirements](#enable-snippets-once).
 
-Read-only health checks across gateway config, auth, and channels. Each finding carries a check id, a severity, and a `fixHint` naming the command that repairs it. Add `--json` for machine-readable output (useful in a cron or a monitoring script), `--severity-min error` to cut the noise, or `--fix` to apply the recommended repairs — read them first, since some, like `--generate-gateway-token`, replace credentials rather than repair them.
+### "Cannot create new thin volume" or "thin pool … reached threshold"
 
-Two caveats worth knowing:
-
-- **Before onboarding, doctor is *supposed* to complain.** On a freshly provisioned VM it reports `Gateway auth is off or missing a token`, `gateway.mode is unset`, and `Gateway is only bound to loopback` — all three are the exact state this script intends to leave behind. They resolve once you finish step 2. That's also why this script doesn't run doctor for you during provisioning.
-- Filing an upstream bug? `openclaw gateway diagnostics export` writes a shareable, payload-free `.zip` — configuration and health, no conversation content.
-
-### ❗ "No storage with 'snippets' content found"
-Enable snippets: **Datacenter → Storage → local → Edit → check `Snippets`**.
-
-### ❗ "Cannot create new thin volume" / "thin pool ... reached threshold"
-Your LVM-thin pool is out of *data* space — this is a storage problem, not a script one. Thin pools are overprovisioned, so the pool can be full even though the volumes on it look modest.
+Your LVM-thin storage is full. Check how full:
 
 ```bash
 pvesm status --content images
 lvs -o lv_name,lv_size,data_percent,metadata_percent
 ```
 
-If `data_percent` is at or near 100, free space before retrying. Options, roughly in order of least regret:
+Then free up space (remove unused VMs, disks or snapshots), pick another storage with `--storage <id>`, or grow the pool with `lvextend -L +50G pve/data`. A pool can also run out of *metadata* space, which fails the same way.
 
-- Delete unused VMs/disks (`qm destroy <VMID> --purge`), or old snapshots, which are usually the quiet culprit.
-- Point this run at a different storage: `bash openclaw-vm.sh --storage <id>`. Any active storage with `images` content works — including a directory storage on a separate disk.
-- Extend the pool if the volume group has room: `lvextend -L +50G pve/data`.
+### "Storage 'X' does not support VM disk images"
 
-Watch `metadata_percent` too — a thin pool can exhaust *metadata* while data space still looks fine, and that fails the same way.
-
-The script warns before downloading anything if the target storage reports under ~10 G available, so you normally see this coming. That advisory is warn-only: thin pools are overprovisioned by design, so a low number is not always fatal and the script won't refuse to run on it.
-
-### ❗ "Storage 'X' does not support VM disk images"
-The auto-selected storage can't hold VM disks. Pick one explicitly:
+Choose a storage that can hold VM disks:
 
 ```bash
 bash openclaw-vm.sh --storage local-zfs
 ```
 
-### ❗ Control UI: "Could not connect" from another machine
-If your screen looks like this — a correctly entered token, "Could not connect" regardless:
+### The Control UI says "Could not connect"
 
-![OpenClaw Control UI "Could not connect" error, caused by browsing to a LAN IP over plain HTTP instead of a secure context](img/control-ui-wrong-way.png)
+If you're opening `http://<vm-ip>:18789`, that's the cause — use an option from [step 4](#4-open-the-control-ui). You can confirm by clicking **Raw error**: it says `control ui requires device identity (use HTTPS or localhost secure context)`.
 
-Click **▶ Raw error** in the red box — if it says `control ui requires device identity (use HTTPS or localhost secure context)`, you're browsing `http://<vm-ip>:18789`, which **can never work**: the Control UI needs browser WebCrypto for its device identity, and that only exists in a secure context (HTTPS or localhost). No token fixes this. Use one of the four step-4 access paths: SSH tunnel → `http://localhost:18789` (A), Tailscale Serve (B), Cloudflare Tunnel (C), or nginx + self-signed TLS (D).
-
-If the raw error is something else, get the server's version of events — tail the gateway log while clicking Connect once:
+If you're already using a step 4 option, watch the gateway log while you click **Connect**:
 
 ```bash
 tail -f /tmp/openclaw-$(id -u)/openclaw-$(date +%F).log
 ```
 
-The `reason=` field in the `closed before connect` line is the ground truth. A `1008` with an auth reason after the secure-context requirement is satisfied usually means the token in your browser isn't the one in `gateway.auth.token` — re-run the token-sync line from step 3 and paste the file token again (the UI caches an old token in the form field; clear it manually).
+Look at `reason=` on the `closed before connect` line. An authentication reason usually means the browser remembered an old token — clear the token field and paste the current one from `openclaw gateway auth-token --show`.
 
-### ❗ "Permission denied (publickey)" when connecting to the VM
-You're almost certainly connecting from the wrong machine. The embedded SSH key is auto-detected from **the Proxmox node** (`/root/.ssh/id_ed25519.pub` or `id_rsa.pub`), not from wherever you're typing the `ssh` command. This fails at the handshake, before any password prompt — it's unrelated to the password-expiry issues below.
+### "Permission denied (publickey)"
 
-There is no password fallback: Ubuntu cloud images disable `PasswordAuthentication` and this script doesn't enable it, so SSH is key-only.
+Only the Proxmox node's SSH key is installed, and password SSH is off. Log in through the Proxmox console or from the node, then add your computer's key — [see step 1](#1-log-in).
 
-Two fixes, both fine:
+### "Password change required but no TTY available" — or `sudo` says "Authentication token manipulation error"
 
-- **Use the Proxmox console instead** — **Datacenter → node → VM → Console** — and log in with the username and console password from the summary. This needs no key and works from anywhere.
-- **SSH from the Proxmox node itself**, whose key is the one that was embedded.
+You haven't changed the initial password yet. Log in once through the console or an interactive `ssh` session and set a new password; both errors go away.
 
-Either way, once you have a shell, append your own workstation's public key to `~/.ssh/authorized_keys` on the VM so you can connect directly next time. Or pass `--ssh-key` at creation time pointing at a file with both keys (one per line).
+### The script says UNCONFIRMED, but the VM seems fine
 
-### ❗ "--disk 512M is not larger than the cloud image's virtual size"
-`qm resize` treats a bare size as absolute and cannot shrink. Use something larger than ~3.5 GiB — `40G` is the default for a reason.
-
-### ❗ Script says UNCONFIRMED but the VM looks fine
-Status polling goes through `qm guest exec`. If the agent responds to `ping` but exec is blocked or slow, the install may have succeeded anyway. Check directly:
+Setup may still be running, or finished after the script stopped waiting. Check:
 
 ```bash
 qm guest exec <VMID> -- cat /var/log/openclaw-install.ok
 ```
 
-### ❗ "Password change required but no TTY available."
-Expected. Cloud-init expires the initial password, and until you change it interactively, PAM refuses **all** non-interactive SSH commands for that user — even with valid key auth. Log in interactively once (`ssh <user>@<vm-ip>`) and set a new password. This is exactly why the script polls via the guest agent instead of SSH.
+### The script says FAILED, or `openclaw: command not found`
 
-### ❗ "sudo: PAM error: Authentication token manipulation error"
-The same root cause, and it clears the same way. While the initial password is expired, `sudo` fails for that user **even though the account has `NOPASSWD: ALL`** — `NOPASSWD` skips the auth stack, but PAM's *account* stack still rejects an expired password. Verified on Ubuntu 26.04: `sudo` fails before the password change and succeeds immediately after.
-
-Nothing in provisioning is affected (it all runs as root), and normal OpenClaw use needs no `sudo` at all — but a command like `ssh <user>@<vm-ip> 'sudo ...'` will fail confusingly until you have logged in once interactively and set a new password.
-
-### ❗ Permissions: what needs to be writable
-Everything OpenClaw writes at runtime lives under `~/.openclaw/` (`state`, `logs`, `plugins`, `openclaw.json`), which the script creates as `0700` owned by the VM user. The npm global install under `/usr/lib/node_modules` is root-owned and stays read-only to the user — that is correct and expected, because nothing writes there at runtime. **Installing OpenClaw plugins does not require `sudo`.**
-
-If the gateway token is ever unreadable, check ownership:
-
-```bash
-stat -c '%U %G %a' ~/.openclaw ~/.openclaw/gateway-token
-# expect: <user> <group> 700   and   <user> <group> 600
-```
-
-The provisioning script asserts both of these and fails loudly rather than leaving you with a token you cannot read.
-
-### ❗ "openclaw: command not found" — or a failed install
 ```bash
 qm guest exec <VMID> -- cat /var/log/openclaw-install.fail
 qm guest exec <VMID> -- tail -n 50 /var/log/openclaw-provision.log
 ```
 
-### ❗ Gateway won't start after a reboot
-Check lingering is enabled:
+If the message says a runtime failed OpenClaw's capability check, re-run with a different `--node` version, or with `--runtime node`.
+
+### The gateway doesn't start after a reboot
+
+This should print `Linger=yes`:
 
 ```bash
-loginctl show-user <user> --property=Linger
+loginctl show-user openclaw --property=Linger
 ```
 
-Should print `Linger=yes`. If not: `sudo loginctl enable-linger <user>`.
+If it doesn't, run `sudo loginctl enable-linger openclaw`.
 
-### ❗ Could not detect VM IP
-Detection tries the bridge neighbor table (matched by MAC) and the guest agent. If both miss, the VM is almost certainly fine — find it via the console (`ip a`) or your router's DHCP leases under the hostname `openclaw-<VMID>`.
+### "Could not detect VM IP"
 
-### ❗ Script aborted, VM auto-deleted
-Failures *before* provisioning trigger cleanup: the VM is stopped, destroyed, and the temp image removed. Check `/var/log/openclaw-vm-<VMID>.log`.
+The VM is usually fine. Find its address in the console with `ip a`, or in your router's list of devices under the name `openclaw-<VMID>`.
+
+### The script failed and removed the VM
+
+If setup fails before OpenClaw installation starts, the script deletes the half-built VM. The reason is in `/var/log/openclaw-vm-<VMID>.log`.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Failed before installation began; any partly created VM was removed |
+| `2` | The VM was kept, but installation failed or couldn't be confirmed |
+| `130` / `143` | Interrupted by Ctrl+C or a stop signal |
 
 ---
 
-## 🔒 Security — Read Before Exposing the Gateway
+## Security
 
-The recommended steady state in this README is the safest one: **gateway on loopback**, reached via one of the four step-4 access paths (SSH tunnel, Tailscale Serve, Cloudflare Tunnel, or nginx + TLS). Nothing listens on 0.0.0.0 unless you opt in — and of the four, only the nginx option puts a port on your LAN.
+- **The gateway only listens on the VM itself and requires your token.** All four [step 4](#4-open-the-control-ui) options keep it that way. Don't open port 18789 to your network to reach the Control UI — browsers can't use it, and OpenClaw warns never to expose the gateway without authentication.
+- `openclaw config set gateway.bind lan` is only for non-browser clients, like OpenClaw's native apps. If you use it, firewall port 18789 to the devices that need it.
+- **With Cloudflare Tunnel, add Cloudflare Access** so your gateway isn't open to the whole internet.
+- **If your token may have leaked** — pasted into a chat, shown on screen, or saved somewhere public — replace it:
 
-- Keep `gateway.auth.mode = "token"`. Non-loopback binds are fail-closed and will refuse to start without auth — that's a feature, don't work around it. OpenClaw's docs are blunt: *"Never expose the Gateway unauthenticated on 0.0.0.0."*
-- **If you enable `bind=lan`** (only useful for native clients or an external reverse proxy — never for browsers): this script does not configure a firewall, so restrict port 18789 to a tight source-IP allowlist yourself.
-- **If you use a Cloudflare Tunnel**, the hostname is internet-reachable — put Cloudflare Access in front of it rather than relying on the gateway token alone (details in step 4, Option C).
-- A fourth mode exists for tailnet users who want a direct port instead of Serve: `openclaw config set gateway.bind tailnet` listens on the Tailscale IP only. Serve (Option B) is what OpenClaw's docs recommend, and it keeps the gateway on loopback.
-- **Rotate the token** if it may have leaked — pasted into a chat, shown in a screenshot or screen share, sent over an insecure channel, or committed anywhere. Treat any of those as a burned credential; rotation is cheap:
   ```bash
   openssl rand -hex 32 > ~/.openclaw/gateway-token
   openclaw config set gateway.auth.token "$(cat ~/.openclaw/gateway-token)"
   openclaw gateway restart
-  openclaw gateway auth-token --show     # confirm the new one is live
   ```
-  Any browser holding the old token stops working immediately — that is the point. The Control UI caches the last token you typed, so clear that field before reconnecting.
 
-The initial **console password is printed to the host log** (`/var/log/openclaw-vm-<VMID>.log`). It's needed for console fallback and must be changed on first login. Both the log and the cloud-init snippet are created `0600` (v1.2.0+); if you ran an earlier version, tighten the old files once:
-
-```bash
-chmod 600 /var/log/openclaw-vm-*.log /var/lib/vz/snippets/openclaw-*.yaml
-```
+  Then clear the old token from the Control UI in your browser.
+- **The console password is saved in the host log and the cloud-init snippet**, both readable only by root. Change it at first login, and delete snippet files for VMs you've destroyed.
 
 ---
 
-## ⚠️ Known Limitations
+## Reference
 
-### 🧪 What has and hasn't been run on hardware
-The full provisioning path — `qm`/QGA plumbing, thin-LVM import/resize, cloud-init, Node + OpenClaw install — has been run end to end on a real PVE 7 node twice: July 2026 (v1.1.0, through onboarding) and September 2026 (v1.4.0, provisioning only). See [Status](#-status).
+### Default VM settings
 
-Two things remain unexercised on hardware. **The interactive storage picker** added in v1.4.0 has not fired on a real node — the run that would have triggered it had enough free space, so the prompt path is verified only by unit-style testing of its input handling. And **onboarding** (`openclaw onboard`) has not been repeated since July, against a much older OpenClaw.
+| Setting | Value |
+|---|---|
+| Operating system | Ubuntu cloud image, latest LTS |
+| User | `openclaw`, with passwordless `sudo` |
+| Login | The node's SSH key, plus a one-time console password |
+| Hostname | `openclaw-<VMID>` |
+| Network | DHCP on `vmbr0` (or the first bridge found) |
+| CPU / machine | `host` / `q35` |
+| Starts with the node | Yes |
+| Guest agent | Installed and running |
+| Node.js | 24 (LTS) from NodeSource, or a working Node already on the image |
+| Gateway runtime | Node, unless `--runtime` selects Bun |
+| OpenClaw | Installed globally with npm |
+| Gateway port | `18789`, on localhost only |
 
-**Nor have v1.6.0's runtime detection and Bun-hosted gateway.** They were tested by running the shipped guest code across 13 scenarios in a Node-free sandbox, and by running a Bun-hosted gateway on a live systemd user session — but never inside a real provisioned VM.
+### Disk and memory
 
-### 🔍 Runtime detection only looks in the usual places
-An existing Node is found through `PATH`; an existing Bun through `PATH` or the VM user's `~/.bun/bin`. A Node installed per-user with nvm, fnm or Volta is not on root's `PATH` during provisioning, so it is not detected, and NodeSource installs one alongside it. That only matters on a customized image — fresh cloud images ship no runtime to find.
+A freshly set-up VM uses about **5 GB** of disk. The 40 GB default leaves room for logs, conversation history, and a browser if you add one later. OpenClaw's browser automation isn't set up — nothing installs a browser.
 
-### 🖥️ amd64 only
-The cloud image URL is hard-coded to `amd64`. Edit `-server-cloudimg-amd64.img` → `-arm64.img` for ARM hosts.
+A 2 GB swap file is added because Ubuntu cloud images have none, which would otherwise turn a brief memory spike during installation into a crash.
 
-### 🚫 Live migration disabled (`--cpu host`)
-Best performance, but blocks live migration between hosts with different CPUs. Offline migration works. To change: `qm set <VMID> --cpu kvm64`.
+### Known limitations
 
-### 🔄 Latest LTS is auto-detected
-Queries Launchpad for the newest active LTS, falling back to `noble`. **Risk:** once the next `.04` enters Active Development (~6 months pre-release) it is flagged active and gets picked before its cloud image exists — the failure is a loud 404 from `curl`. Pin with `--ubuntu <codename>` to bypass.
+- **amd64 only.** For ARM, change `-server-cloudimg-amd64.img` to `-arm64.img` in the script.
+- **No live migration** between hosts with different CPUs, because the VM uses `--cpu host`. Change it with `qm set <VMID> --cpu kvm64`.
+- **Latest-LTS detection can pick a release too early** — before its cloud image exists — which fails with a download error. Pin a release with `--ubuntu <codename>`.
+- **Runtime detection only checks the usual places:** `PATH`, plus `~/.bun/bin` for Bun. A Node installed with nvm, fnm or Volta isn't found.
+- **Nothing is removed after a successful run**, and `qm destroy` doesn't delete the VM's snippet file. Clean up with the commands in [Everyday commands](#everyday-commands).
 
-### 🧹 No automatic teardown on success
-Cleans up after failure, not after a successful run. See [Useful Commands](#-useful-commands).
+### Design notes
 
-### 📄 Snippet files accumulate
-`qm destroy` does not remove `<snippet-dir>/openclaw-<VMID>.yaml`. They pile up across retries — and each contains that VM's initial console password, so clean up the ones belonging to destroyed VMs.
+For anyone changing the script — these look odd but matter:
 
----
-
-## 🛠️ Useful Commands
-
-On the **Proxmox node**:
-
-```bash
-# Lifecycle
-qm status <VMID>
-qm start <VMID>
-qm shutdown <VMID>              # graceful
-qm stop <VMID>                  # hard power-off
-qm reboot <VMID>
-
-# Access
-qm terminal <VMID>              # serial console (Ctrl+O to exit)
-ssh <user>@<vm-ip>
-
-# Inspection (no SSH needed)
-qm config <VMID>
-qm guest exec <VMID> -- cat /var/log/openclaw-install.ok
-qm guest exec <VMID> -- tail -n 40 /var/log/openclaw-provision.log
-cat /var/log/openclaw-vm-<VMID>.log
-
-# Complete teardown
-qm stop <VMID>
-qm destroy <VMID> --purge
-rm -f <snippet-dir>/openclaw-<VMID>.yaml
-```
-
-Inside the **VM**:
-
-```bash
-node --version
-openclaw --version
-
-openclaw doctor --lint                  # read-only health checks (--json to parse)
-openclaw gateway status --require-rpc   # non-zero exit if the RPC probe fails
-openclaw gateway auth-token --show      # reveal the token actually in use
-openclaw dashboard --no-open            # print the Control UI URL with token
-openclaw gateway diagnostics export     # payload-free support bundle
-
-systemctl --user status openclaw-gateway.service
-journalctl --user -u openclaw-gateway -f
-```
-
----
-
-## 🏗️ Design Notes
-
-A few things in this script look odd and are load-bearing. Before "simplifying" any of them, know what they prevent:
-
-- **Status is polled via the QEMU Guest Agent, never SSH.** `chpasswd: expire: true` makes PAM reject every no-TTY SSH command for the user until the password is changed interactively. SSH-based polling *cannot* succeed — it would stall the full timeout and falsely report failure on every run.
-- **The cloud-init user-data is assembled in three heredocs** (interpolated → quoted → interpolated). The provisioning script lives inside the quoted one so every `$` and backtick stays literal, eliminating a whole class of escaping bugs.
-- **Values reach the guest script as positional arguments, never by interpolation.** Because that middle heredoc is quoted, writing `${OPENCLAW_VERSION}` inside it would arrive in the guest as a literal string and expand to empty — silently running `npm install -g openclaw@`. The user, Node major, and OpenClaw version are passed as `$1`/`$2`/`$3` from `runcmd` instead, and the guest asserts all three with `${N:?...}` so a half-applied edit fails loudly at first boot rather than installing the wrong thing.
-- **`--openclaw-version` is validated by an anchored regex, and that regex is the security boundary** — not the quoting around it. The value is interpolated into runcmd YAML and then into a single-quoted argument inside a `bash -c` string; requiring a leading alphanumeric is what rejects `-`/`--` (npm flag injection) and `@`/`/` (package-spec substitution like `github:owner/repo`) before it ever gets there.
-- **The imported disk volid is read back from `qm config`**, not reconstructed. Directory/NFS storages produce `storage:VMID/vm-VMID-disk-0.raw`, and the disk index is the lowest *free* one — a guess can silently attach a stale orphan.
-- **The apt lock timeout is written to `apt.conf.d`**, not passed with `-o`, because the NodeSource setup script runs its own apt commands internally.
-- **Runtimes are validated by what they can do, not by version number.** A capability probe lifted from OpenClaw's own installer runs against every candidate: an existing Node, the Node that gets installed, an existing Bun, the Bun that gets installed. OpenClaw moved its Node floor twice inside patch releases in eight days, so a hardcoded version gate goes stale; the probe doesn't. It runs before the ~520 MB OpenClaw install, so a bad runtime fails in seconds.
-- **Bun hosts the gateway; it never replaces Node.** OpenClaw deliberately requires a real `node` binary even when running under Bun. Don't "optimize" `--runtime bun` into skipping the Node install — it fails the first time OpenClaw starts.
-- **Bun installs to `/opt/bun`, linked as `/usr/local/bin/bun` — not straight into `/usr/local`.** Bun's installer runs `unzip -o` and `rm -r` inside its target `bin` directory, which would be the shared `/usr/local/bin`. And `/usr/local/bin/bun` is one of the fixed paths OpenClaw checks when installing a Bun-hosted gateway. That matters because under cloud-init the installer adds Bun to nobody's `PATH` — it only prints advice to.
-- **`loginctl enable-linger`** is what stops the gateway from dying with your SSH session.
-- **The provisioning script has an EXIT trap** that writes the `.fail` status file, because `fail()` alone can't cover a command that dies unguarded under `set -e`.
-- **The cleanup trap is never disarmed** — it flushes the logging `tee` on success too, and gates destruction on both exit code and `KEEP_VM`.
+- **Progress is checked through the QEMU Guest Agent, not SSH.** Until the first password change, SSH refuses to run commands without a terminal, so SSH-based checking would always fail.
+- **Values reach the in-VM setup script as arguments, not variables.** That script is written inside a quoted heredoc so nothing in it is expanded early; a variable written there would arrive empty. The script checks every argument is present.
+- **`--openclaw-version` and `--runtime` are strictly validated**, because both end up inside cloud-init's `runcmd`.
+- **The imported disk's ID is read back from `qm config`**, not guessed — its name varies by storage type and can collide with leftover disks.
+- **Runtimes are checked by what they can do, not by version number.** OpenClaw's Node requirements change between releases, so the script tests the runtime's SQLite support directly, before the large OpenClaw download.
+- **Bun only runs the gateway; OpenClaw still needs Node.** Bun installs to `/opt/bun` and is linked into `/usr/local/bin`, one of the places OpenClaw looks for it.
+- **`cmake` and other build tools are preinstalled** so native modules can still build if no prebuilt binary matches.
+- **Lingering** keeps the gateway running with nobody logged in.
+- **Traps on exit** make every failure leave a status file and a meaningful exit code.
 
 Scaffolding is derived from [proxmox-bun-vm](https://github.com/wesley83/proxmox-bun-vm).
 
 ---
 
-## 👤 Author
+## Author
 
-Created by: **Wesley Faulkner**
-GitHub: https://github.com/wesley83
+**Wesley Faulkner** · [github.com/wesley83](https://github.com/wesley83)
 
-## 📄 License
+## License
 
-MIT License — feel free to fork, modify, and contribute.
+MIT — feel free to fork, modify and contribute.
