@@ -5,6 +5,116 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbers track `SCRIPT_VERSION` in `openclaw-vm.sh`.
 
+## [1.6.0] - 2026-09-16
+
+Runtime detection, and an opt-in Bun-hosted gateway. Building it overturned
+the premise it started from — a claim made in conversation, never shipped in
+these docs, that OpenClaw can run on Bun with no Node present. Verified in a
+genuinely Node-free sandbox against OpenClaw 2026.9.4, it cannot, so the
+feature is built around what is actually true.
+
+### Added
+
+- **`--runtime <auto|node|bun>`** (default `auto`). Node is installed or
+  reused in **every** mode; the flag chooses what the gateway runs on.
+  - `auto` reuses a usable Node already on the image instead of installing one
+    from NodeSource, and runs the gateway on Bun only if a usable Bun was
+    already present.
+  - `bun` installs Bun if needed and runs the gateway on it; the onboarding
+    instructions gain `--daemon-runtime bun`.
+  - `node` never uses Bun.
+
+  On a fresh Ubuntu cloud image `auto` behaves exactly as before: the
+  `resolute` and `noble` package manifests contain no JavaScript runtime, so
+  there is nothing to detect. Detection only changes behaviour on a customized
+  image. An explicit `--node <major>` is never swapped for a different Node
+  already present.
+- **Every candidate runtime goes through the v1.5.0 capability probe** — an
+  existing Node, the Node that gets installed, an existing Bun, the Bun that
+  gets installed. The probe is now defined once and reports "Bun x.y.z" or
+  "Node x.y.z" correctly, and a runtime without `node:sqlite` at all gets a
+  clean message instead of a stack trace.
+- **Bun is installed to `/opt/bun` and linked as `/usr/local/bin/bun`.** Bun's
+  installer runs `unzip -o` and `rm -r` inside its target `bin` directory, so
+  pointing it at `/usr/local` would operate inside the shared
+  `/usr/local/bin`. `/usr/local/bin/bun` is also one of the fixed paths
+  OpenClaw's `buildBunCandidates` checks when installing a Bun-hosted gateway —
+  which matters, because under cloud-init (`SHELL=/bin/sh`) the installer does
+  not add Bun to anyone's `PATH`; it only prints advice. Verified: the
+  installer writes nothing outside `$BUN_INSTALL`.
+- An existing Node is reused only if it passes the probe **and** has `npm`
+  alongside it. After a NodeSource install, the binary that will actually run
+  is probed again — a failing `node` earlier on `PATH` shadows `/usr/bin/node`,
+  and now fails with a message that says so.
+- Under `--runtime bun`, a broken existing Bun is a hard failure rather than
+  grounds to install a second copy: OpenClaw checks `~/.bun/bin/bun` before
+  `PATH`, so it could keep choosing the broken one.
+
+### Why Bun cannot replace Node
+
+Tested with no `node` reachable anywhere, via a shadow `PATH` that mirrors
+every system binary except the Node ones:
+
+- `bun add -g --trust openclaw@2026.9.4` — the command OpenClaw's own install
+  docs give for Bun — exits 1. `--trust` lets OpenClaw's preinstall run, and
+  it scans `PATH` for a real `node`, failing closed. Its source explains why: a
+  Bun-backed runtime "cannot satisfy the package's Node engine contract".
+- Without `--trust` the install succeeds, but OpenClaw writes a
+  `.openclaw-lifecycle-pending` marker and its launcher replays the blocked
+  lifecycle steps on first run — including that same check. So
+  `bun openclaw.mjs` and `bun run --bun openclaw` both fail.
+- Deleting the marker would get past it, but that defeats a deliberate upstream
+  safety check ("package lifecycle is incomplete") and would break on the next
+  release. Not done.
+
+What does work, and was verified live: with Node present,
+`openclaw onboard --install-daemon --daemon-runtime bun` writes a service whose
+`ExecStart` runs `bun`, the gateway process's executable is Bun, it listens on
+`127.0.0.1:18789`, and `openclaw gateway status --require-rpc` exits 0 with
+"Read probe: ok". The test ran against a live systemd user session with a
+cleanup trap, and left zero units, processes, or open ports behind.
+
+Node stays the default: OpenClaw's docs call it the primary, recommended
+runtime, and note that Bun 1.4.2 can keep SQLite handles and WAL files open
+after close.
+
+### Fixed
+
+- **Two friendly failure messages had been unreachable since v1.0.** The
+  guest resolved the VM user with
+  `USER_HOME="$(getent passwd "$VM_USER" | cut -d: -f6)"` followed by
+  `[ -n "$USER_HOME" ] || fail "could not resolve home directory..."`, and
+  likewise `USER_GROUP="$(id -gn "$VM_USER")"` with its own `fail`. Under
+  `set -euo pipefail`, a failing command substitution in an assignment aborts
+  the script on that line, so neither `fail` could ever run; provisioning died
+  with only the EXIT trap's generic "exited unexpectedly". Proven both ways in
+  isolation (silent exits 2 and 1 before; the intended messages after) and
+  fixed with `|| true` inside each substitution.
+- The new Bun detection had the same bug on its own `getent` call. It was
+  caught by the scenario harness below, before shipping, and is what led to
+  finding the two above.
+- **The `--node` validation error still cited OpenClaw's abandoned floors**
+  (`22.22.3+, 24.15+, or 25.9+`). It now gives the current `24.16+ or 26.1+`.
+- The summary box no longer claims Node always came from NodeSource.
+
+### Tested
+
+- **13-scenario matrix running the shipped guest code**, extracted from the
+  script rather than copied, in a Node-free sandbox with only `apt-get` and
+  `curl` stubbed. The harness refuses to run if any privileged path
+  (`/opt/bun`, `/usr/local/bin/bun`, `/var/log`, `PATH`) was not redirected.
+  Covers: fresh image; reusing a good Node; replacing a failing Node; a
+  failing Node shadowing the install; `auto` picking up an existing Bun; `node`
+  ignoring one; installing Bun; refusing a broken Bun; an explicit `--node`
+  mismatch; Node without npm; a per-user Bun in `~/.bun/bin`; an invalid
+  policy; `auto` ignoring a broken Bun. **13/13 pass.** The first run failed
+  9 of them, which is how the pipefail bugs surfaced.
+- The host summary renders the correct onboarding command for all four
+  combinations of confirmed/unconfirmed status and runtime, all within 80
+  columns.
+- shellcheck unchanged at 34 SC2317 trap-function notes.
+- **Not run on Proxmox hardware.**
+
 ## [1.5.0] - 2026-09-13
 
 Research into autodetecting an existing Node/Bun runtime turned up two things
@@ -741,6 +851,7 @@ Scaffolding (storage/snippet detection, cleanup trap, tee logging) is
 derived from `proxmox-bun-vm`, adapted with several defect fixes documented
 in the initial commit.
 
+[1.6.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.6...v1.5.0
 [1.4.6]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.5...v1.4.6
 [1.4.5]: https://github.com/wesley83/proxmox-openclaw-vm/compare/v1.4.4...v1.4.5

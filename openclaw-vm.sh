@@ -16,7 +16,7 @@
 # Every defensive construct carried over from that script is load-bearing —
 # see its git history before "simplifying" any of it.
 #
-# Version: v1.5.0
+# Version: v1.6.0
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -46,7 +46,7 @@ DEBUG() { [[ "$DEBUG" -eq 1 ]] || return 0; echo "${CYAN}[DEBUG]${RESET} $*"; }
 ############################################
 # Banner
 ############################################
-SCRIPT_VERSION="v1.5.0"
+SCRIPT_VERSION="v1.6.0"
 REPO_URL="https://github.com/openclaw/openclaw"
 
 # %s form rather than putting variables in the format string: harmless today
@@ -109,11 +109,14 @@ VM_USER="openclaw"
 # default for an unattended Linux provision.
 NODE_MAJOR=24             # matches OpenClaw installer's Linux default
 OPENCLAW_VERSION="latest" # npm version or dist-tag; pin with --openclaw-version
+RUNTIME_POLICY="auto"     # auto|node|bun -- see --runtime in the help text
 SSH_KEY_PATH="auto"       # auto-detect /root/.ssh/id_ed25519.pub or id_rsa.pub
 STORAGE_ID="auto"         # VM disk storage; set via --storage
 SNIPPET_STORAGE_ID="auto" # cloud-init snippet storage; set via --snippet-storage
 DEBUG=0
 _UBUNTU_USER_SET=0        # Set to 1 if --ubuntu is passed on the command line
+_NODE_USER_SET=0          # Set to 1 if --node is passed: an explicit major is
+                          # never swapped for a different Node already on the image
 
 # NodeSource publishes setup_<major>.x for these majors only (verified
 # 2026-07-28: 22/24/25/26 return 200, 27 returns 404). Picking anything else
@@ -176,6 +179,12 @@ Options:
                           ${OPENCLAW_VERSION}; e.g. 2026.9.1, next). Pin it for
                           reproducible builds. Not checked against the registry
                           — a typo only fails once the VM is up
+  --runtime <r>           auto, node or bun (default ${RUNTIME_POLICY}). Node is always
+                          installed or reused: OpenClaw cannot run without it.
+                          auto reuses a usable Node already on the image and
+                          hosts the gateway on Bun only if a usable Bun was
+                          already there. bun installs Bun and hosts the gateway
+                          on it. node never uses Bun
   --user <name>           VM username (default: ${VM_USER}; lowercase, must
                           start with letter or _ and be <= 32 chars)
   --storage <id>          Proxmox storage for the VM disk (default: local-lvm
@@ -232,10 +241,10 @@ while [[ $# -gt 0 ]]; do
       [[ " ${SUPPORTED_NODE_MAJORS} " == *" $2 "* ]] || {
         ERROR "--node ${2}: NodeSource does not publish setup_${2}.x"
         ERROR "Supported majors: ${SUPPORTED_NODE_MAJORS}"
-        ERROR "OpenClaw requires Node 22.22.3+, 24.15+, or 25.9+ (26 recommended)."
+        ERROR "OpenClaw 2026.9.3+ requires Node 24.16+ or 26.1+ (24 is the LTS default)."
         exit 1
       }
-      NODE_MAJOR="$2"; shift 2;;
+      NODE_MAJOR="$2"; _NODE_USER_SET=1; shift 2;;
     --openclaw-version)
       # This value is interpolated into the runcmd YAML and then into a
       # single-quoted argument inside a 'bash -c' string, so this regex — not
@@ -248,6 +257,12 @@ while [[ $# -gt 0 ]]; do
         exit 1
       }
       OPENCLAW_VERSION="$2"; shift 2;;
+    --runtime)
+      # Closed set, so the value is safe to interpolate into the runcmd YAML.
+      case "${2:-}" in
+        auto|node|bun) RUNTIME_POLICY="$2"; shift 2;;
+        *) ERROR "--runtime must be one of: auto, node, bun"; exit 1;;
+      esac;;
     --user)
       [[ "${2:-}" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { ERROR "--user must be a valid Linux username (lowercase, starts with a-z or _, max 32 chars)"; exit 1; }
       VM_USER="$2"; shift 2;;
@@ -389,6 +404,7 @@ INFO "VM Name: $VM_NAME"
 INFO "Ubuntu codename: $UBUNTU_CODENAME"
 INFO "Node.js major: $NODE_MAJOR"
 INFO "OpenClaw version: $OPENCLAW_VERSION"
+INFO "Runtime policy: $RUNTIME_POLICY"
 INFO "VM user: $VM_USER"
 INFO "Resources: ${MEMORY_MB} MB RAM, ${CORES} cores, disk ${DISK_SIZE}, swap ${SWAP_SIZE}"
 
@@ -1061,9 +1077,12 @@ write_files:
       # always-on systemd user service. Invoked once by cloud-init runcmd.
       set -euo pipefail
 
-      VM_USER="${1:?usage: openclaw-provision.sh <user> <node-major> <openclaw-version>}"
-      NODE_MAJOR="${2:?usage: openclaw-provision.sh <user> <node-major> <openclaw-version>}"
-      OPENCLAW_VERSION="${3:?usage: openclaw-provision.sh <user> <node-major> <openclaw-version>}"
+      USAGE="usage: openclaw-provision.sh <user> <node-major> <openclaw-version> <runtime> <node-explicit>"
+      VM_USER="${1:?$USAGE}"
+      NODE_MAJOR="${2:?$USAGE}"
+      OPENCLAW_VERSION="${3:?$USAGE}"
+      RUNTIME_POLICY="${4:?$USAGE}"
+      NODE_EXPLICIT="${5:?$USAGE}"
 
       rm -f /var/log/openclaw-install.ok /var/log/openclaw-install.fail
 
@@ -1079,48 +1098,53 @@ write_files:
       # then point the operator at a status file that does not exist.
       trap 'rc=$?; if [ "$rc" -ne 0 ] && [ ! -f /var/log/openclaw-install.fail ]; then echo "provision script exited ${rc} unexpectedly (see /var/log/openclaw-provision.log)" > /var/log/openclaw-install.fail; fi' EXIT
 
+      # cloud-init does not promise a login-shell environment for runcmd, and
+      # runtime detection below has to see /usr/local/bin, where a
+      # pre-installed or system-wide runtime normally lives. The Bun
+      # installer also reads HOME.
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+      export HOME="${HOME:-/root}"
+
+      case "$RUNTIME_POLICY" in
+        auto|node|bun) ;;
+        *) fail "unknown runtime policy '${RUNTIME_POLICY}' (expected auto, node or bun)" ;;
+      esac
+
       # The dpkg-lock timeout lives in /etc/apt/apt.conf.d/90openclaw-lock-timeout,
       # written by write_files in the cloud_init stage so it covers cloud-init's
       # own packages phase AND the NodeSource setup script's internal apt calls.
       echo "[*] Waiting for any in-flight apt work to finish..."
       apt-get update -qq || true
 
-      echo "[*] Installing Node.js ${NODE_MAJOR}.x from NodeSource..."
-      curl -fsSL -o /tmp/nodesource_setup.sh "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" \
-        || fail "could not download NodeSource setup script for Node ${NODE_MAJOR}.x"
-      bash /tmp/nodesource_setup.sh || fail "NodeSource setup script failed"
-      rm -f /tmp/nodesource_setup.sh
-      DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs \
-        || fail "apt-get install nodejs failed"
-
-      command -v node >/dev/null 2>&1 || fail "node is not on PATH after install"
-      NODE_VER="$(node -v)"
-      echo "[*] Node installed: ${NODE_VER}"
-
-      # Verify the runtime actually WORKS rather than trusting a version
-      # number. Ubuntu's own apt node is 18, which silently breaks OpenClaw
-      # and anything Playwright-shaped -- but version floors alone have proven
-      # a bad gate here: OpenClaw moved its own floor twice inside patch
-      # releases (2026.9.2 -> .3 -> .4), so any number hardcoded here is
-      # stale on arrival, and it also conflicts with --openclaw-version, where
-      # an older pin legitimately supports older majors.
+      # ---- Runtime capability probe ------------------------------------------
+      # The single test for "can OpenClaw use this runtime", run against every
+      # candidate: an existing Node, the Node we install, an existing Bun, the
+      # Bun we install. It tests behaviour, not version numbers -- OpenClaw
+      # moved its own floor twice inside patch releases (2026.9.2 -> .3 -> .4),
+      # so any number hardcoded here goes stale, and floors also conflict with
+      # --openclaw-version, where an older pin supports older majors.
       #
-      # This is a behavioural probe instead, lifted from OpenClaw's own
-      # installer (node_binary_has_safe_sqlite in install.sh). It opens
-      # node:sqlite, checks the SQLite build is WAL-reset-safe, and
-      # round-trips embedded NUL bytes through TEXT, BLOB and JSON columns.
-      # That is the failure OpenClaw actually rejects runtimes for
-      # (nodejs/node#61954 truncates TEXT at the first NUL), and testing the
-      # behaviour means this gate needs no maintenance when upstream moves a
-      # floor again. Verified to discriminate correctly: Node 24.19 and Bun
-      # 1.4.2 pass, Node 22.23.2 fails with the exact upstream diagnostic.
+      # Lifted from OpenClaw's own installer (node_binary_has_safe_sqlite in
+      # install.sh): open node:sqlite, check the SQLite build is
+      # WAL-reset-safe, and round-trip embedded NUL bytes through TEXT, BLOB
+      # and JSON columns -- the failure runtimes are actually rejected for
+      # (nodejs/node#61954 truncates TEXT at the first NUL). Verified to
+      # discriminate: Node 24.19 and Bun 1.4.2 pass, Node 22.23.2 fails with
+      # the exact upstream diagnostic.
       #
-      # It runs BEFORE the OpenClaw install on purpose -- it only needs
-      # node:sqlite, so a broken runtime fails here in seconds instead of
-      # after a ~520 MB npm install. Uses only double quotes so it survives
-      # being wrapped in node -e '...' inside this quoted heredoc.
-      node --no-warnings -e '
-      const { DatabaseSync } = require("node:sqlite");
+      # Only double quotes inside, so it survives this single-quoted
+      # assignment within the quoted heredoc. The NUL bytes are built with
+      # String.fromCharCode because a literal escape sequence here was once
+      # turned into real NUL bytes by an editing tool.
+      RUNTIME_PROBE_JS='
+      const label = process.versions.bun ? "Bun " + process.versions.bun : "Node " + process.versions.node;
+      let DatabaseSync;
+      try {
+        ({ DatabaseSync } = require("node:sqlite"));
+      } catch {
+        console.error(label + ": node:sqlite is not available");
+        process.exit(1);
+      }
       const db = new DatabaseSync(":memory:");
       try {
         const value = db.prepare("SELECT sqlite_version() AS version").get()?.version;
@@ -1145,17 +1169,133 @@ write_files:
         const blobSafe = row?.blob_value instanceof Uint8Array && Buffer.from(row.blob_value).equals(bytes);
         const jsonSafe = row?.json_value === json && JSON.parse(row.json_value).value === text;
         if (!textSafe) {
-          console.error("Node " + process.versions.node + ": node:sqlite truncates TEXT at embedded NUL (nodejs/node#61954)");
+          console.error(label + ": node:sqlite truncates TEXT at embedded NUL (nodejs/node#61954)");
         } else if (!blobSafe || !jsonSafe) {
-          console.error("Node " + process.versions.node + ": node:sqlite NUL round-trip probe failed");
+          console.error(label + ": node:sqlite NUL round-trip probe failed");
         } else if (!safe) {
-          console.error("Node " + process.versions.node + ": SQLite " + value + " is not WAL-reset-safe");
+          console.error(label + ": SQLite " + value + " is not WAL-reset-safe");
         }
         if (!safe || !textSafe || !blobSafe || !jsonSafe) process.exitCode = 1;
       } finally {
         db.close();
       }
-      ' || fail "Node ${NODE_VER} failed OpenClaw's runtime capability probe (see the diagnostic above). Pick a different --node major -- ${NODE_MAJOR} is not usable."
+      '
+      probe_runtime() {
+        "$1" --no-warnings -e "$RUNTIME_PROBE_JS"
+      }
+
+      # ---- Node: required in every mode --------------------------------------
+      # Node is installed or reused even under --runtime bun. Verified against
+      # OpenClaw 2026.9.4 on a machine with no Node at all: Bun cannot replace
+      # it. `bun add -g --trust openclaw` fails in OpenClaw's own preinstall,
+      # which scans PATH for a real node and fails closed ("a Bun-backed
+      # candidate ... cannot satisfy the package's Node engine contract").
+      # Without --trust the install succeeds but leaves a
+      # .openclaw-lifecycle-pending marker, and the launcher replays that same
+      # check on first run -- so `bun openclaw.mjs` and `bun run --bun
+      # openclaw` fail too. Bun can host the gateway; it cannot replace Node.
+      NODE_SOURCE=""
+      EXISTING_NODE="$(command -v node 2>/dev/null || true)"
+      if [ -n "$EXISTING_NODE" ]; then
+        EXISTING_NODE_VER="$("$EXISTING_NODE" -v 2>/dev/null || echo unknown)"
+        EXISTING_NODE_MAJOR="${EXISTING_NODE_VER#v}"
+        EXISTING_NODE_MAJOR="${EXISTING_NODE_MAJOR%%.*}"
+        if [ "$NODE_EXPLICIT" = "1" ] && [ "$EXISTING_NODE_MAJOR" != "$NODE_MAJOR" ]; then
+          echo "[*] Found Node ${EXISTING_NODE_VER} at ${EXISTING_NODE}, but --node ${NODE_MAJOR} was requested explicitly."
+        elif ! command -v npm >/dev/null 2>&1; then
+          echo "[*] Found Node ${EXISTING_NODE_VER} at ${EXISTING_NODE}, but no npm to install OpenClaw with."
+        elif probe_runtime "$EXISTING_NODE"; then
+          NODE_SOURCE="reused"
+          echo "[*] Found Node ${EXISTING_NODE_VER} at ${EXISTING_NODE}; it passes the capability probe -- reusing it."
+        else
+          echo "[*] Found Node ${EXISTING_NODE_VER} at ${EXISTING_NODE}, but it fails the capability probe (above)."
+        fi
+      else
+        echo "[*] No existing Node found."
+      fi
+
+      if [ -z "$NODE_SOURCE" ]; then
+        echo "[*] Installing Node.js ${NODE_MAJOR}.x from NodeSource..."
+        curl -fsSL -o /tmp/nodesource_setup.sh "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" \
+          || fail "could not download NodeSource setup script for Node ${NODE_MAJOR}.x"
+        bash /tmp/nodesource_setup.sh || fail "NodeSource setup script failed"
+        rm -f /tmp/nodesource_setup.sh
+        DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs \
+          || fail "apt-get install nodejs failed"
+        NODE_SOURCE="installed"
+      fi
+
+      command -v node >/dev/null 2>&1 || fail "node is not on PATH after install"
+      NODE_BIN="$(command -v node)"
+      NODE_VER="$(node -v)"
+      echo "[*] Node ${NODE_SOURCE}: ${NODE_VER} (${NODE_BIN})"
+
+      # Probe the binary that will actually run, not the one just installed:
+      # a failing node earlier on PATH (a tarball in /usr/local/bin, say)
+      # shadows NodeSource's /usr/bin/node. Runs BEFORE the OpenClaw install,
+      # so a bad runtime fails in seconds instead of after ~520 MB of npm.
+      probe_runtime "$NODE_BIN" \
+        || fail "Node ${NODE_VER} at ${NODE_BIN} failed OpenClaw's runtime capability probe (see the diagnostic above). Pick a different --node major; if ${NODE_BIN} is not /usr/bin/node, it is shadowing the NodeSource install."
+
+      # ---- Gateway runtime: node or bun --------------------------------------
+      # auto: Bun only if a usable one was ALREADY present -- "use what is
+      #       there" -- so a fresh cloud image (which ships no JS runtime at
+      #       all; checked against the resolute and noble manifests) stays on
+      #       Node, OpenClaw's primary and recommended runtime.
+      # bun:  install Bun if needed and host the gateway on it.
+      # node: never use Bun.
+      GATEWAY_RUNTIME="node"
+      if [ "$RUNTIME_POLICY" != "node" ]; then
+        BUN_BIN=""
+        EXISTING_BUN="$(command -v bun 2>/dev/null || true)"
+        # `|| true`: getent exits 2 for an unknown user, and under pipefail a
+        # failing pipeline in an assignment aborts the whole script via set -e.
+        BUN_USER_HOME="$(getent passwd "$VM_USER" 2>/dev/null | cut -d: -f6 || true)"
+        if [ -z "$EXISTING_BUN" ] && [ -n "$BUN_USER_HOME" ] && [ -x "$BUN_USER_HOME/.bun/bin/bun" ]; then
+          EXISTING_BUN="$BUN_USER_HOME/.bun/bin/bun"
+        fi
+        if [ -n "$EXISTING_BUN" ]; then
+          if probe_runtime "$EXISTING_BUN"; then
+            BUN_BIN="$EXISTING_BUN"
+            echo "[*] Found Bun $("$BUN_BIN" --version 2>/dev/null) at ${BUN_BIN}; it passes the capability probe."
+          else
+            echo "[*] Found Bun at ${EXISTING_BUN}, but it fails the capability probe (above)."
+          fi
+        fi
+
+        if [ "$RUNTIME_POLICY" = "bun" ] && [ -z "$BUN_BIN" ]; then
+          # Refuse rather than install a second Bun beside a broken one:
+          # OpenClaw checks ~/.bun/bin/bun before PATH, so it could keep
+          # choosing the broken copy.
+          if [ -n "$EXISTING_BUN" ]; then
+            fail "Bun at ${EXISTING_BUN} fails OpenClaw's runtime capability probe (see above). Upgrade it (bun upgrade) or remove it and re-run, or re-run with --runtime node."
+          fi
+          # Its own prefix, linked into /usr/local/bin. The installer runs
+          # `unzip -o` and `rm -r` inside $BUN_INSTALL/bin, so pointing it at
+          # /usr/local would operate inside a shared directory. And
+          # /usr/local/bin/bun is one of the fixed paths OpenClaw checks when
+          # installing a Bun-hosted gateway, so it is found from any shell or
+          # service context -- which matters, because under cloud-init the
+          # installer does NOT add Bun to anyone's PATH; it only prints advice.
+          echo "[*] Installing Bun to /opt/bun..."
+          curl -fsSL -o /tmp/bun-install.sh https://bun.sh/install \
+            || fail "could not download the Bun installer"
+          BUN_INSTALL=/opt/bun bash /tmp/bun-install.sh >/tmp/bun-install.log 2>&1 \
+            || { cat /tmp/bun-install.log; fail "Bun installer failed (output above)"; }
+          rm -f /tmp/bun-install.sh /tmp/bun-install.log
+          ln -sfn /opt/bun/bin/bun /usr/local/bin/bun \
+            || fail "could not link /usr/local/bin/bun"
+          BUN_BIN=/usr/local/bin/bun
+          probe_runtime "$BUN_BIN" \
+            || fail "Bun $("$BUN_BIN" --version 2>/dev/null) failed OpenClaw's runtime capability probe (see the diagnostic above); OpenClaw needs Bun 1.4+ with WAL-reset-safe node:sqlite. Re-run with --runtime node."
+          echo "[*] Bun installed: $("$BUN_BIN" --version) (${BUN_BIN} -> /opt/bun/bin/bun)"
+        fi
+
+        if [ -n "$BUN_BIN" ]; then
+          GATEWAY_RUNTIME="bun"
+        fi
+      fi
+      echo "[*] Gateway runtime: ${GATEWAY_RUNTIME} (policy: ${RUNTIME_POLICY})"
 
       echo "[*] Installing OpenClaw (${OPENCLAW_VERSION})..."
       npm install -g "openclaw@${OPENCLAW_VERSION}" \
@@ -1239,13 +1379,18 @@ write_files:
       # passed one — so the printed instructions must wire it explicitly.
       # Generated inside the VM and chmod 600 so it never reaches the
       # Proxmox host log.
-      USER_HOME="$(getent passwd "$VM_USER" | cut -d: -f6)"
+      # `|| true` on both of these makes the fail() on the next line reachable.
+      # Without it, a failing command substitution in an assignment aborts
+      # under set -e (pipefail propagates getent's exit 2 through the pipe),
+      # so these friendly messages were dead code: provisioning died with only
+      # the EXIT trap's generic "exited unexpectedly". Verified both ways.
+      USER_HOME="$(getent passwd "$VM_USER" | cut -d: -f6 || true)"
       [ -n "$USER_HOME" ] || fail "could not resolve home directory for ${VM_USER}"
       # Resolve the primary group instead of assuming it matches the username.
       # cloud-init's users: module does create a matching group by default, but
       # no_user_group or a pre-existing account breaks that assumption and
       # 'install -g' would abort provisioning.
-      USER_GROUP="$(id -gn "$VM_USER")"
+      USER_GROUP="$(id -gn "$VM_USER" 2>/dev/null || true)"
       [ -n "$USER_GROUP" ] || fail "could not resolve primary group for ${VM_USER}"
 
       install -d -m 700 -o "$VM_USER" -g "$USER_GROUP" "$USER_HOME/.openclaw"
@@ -1271,7 +1416,10 @@ write_files:
         || fail "~/.openclaw has wrong ownership/mode (got '${DIR_STAT}', want '${VM_USER} 700')"
       echo "[*] Gateway token written to ${TOKEN_FILE} (${VM_USER}, 600)"
 
-      printf 'node=%s openclaw=%s\n' "$NODE_VER" "$OPENCLAW_VER" > /var/log/openclaw-install.ok
+      # gateway= is read back by the host to decide whether the onboarding
+      # instructions need --daemon-runtime bun. Kept short: this line is
+      # printed verbatim in the host summary.
+      printf 'node=%s openclaw=%s gateway=%s\n' "$NODE_VER" "$OPENCLAW_VER" "$GATEWAY_RUNTIME" > /var/log/openclaw-install.ok
       echo "[*] Provisioning complete."
 YAMLEOF
 
@@ -1282,7 +1430,7 @@ runcmd:
   # Start the guest agent so the host can resolve the VM IP.
   # The package installs but may not auto-start (static preset on newer Ubuntu).
   - [ systemctl, start, qemu-guest-agent ]
-  - [ bash, -c, "/usr/local/sbin/openclaw-provision.sh '${VM_USER}' '${NODE_MAJOR}' '${OPENCLAW_VERSION}' >/var/log/openclaw-provision.log 2>&1" ]
+  - [ bash, -c, "/usr/local/sbin/openclaw-provision.sh '${VM_USER}' '${NODE_MAJOR}' '${OPENCLAW_VERSION}' '${RUNTIME_POLICY}' '${_NODE_USER_SET}' >/var/log/openclaw-provision.log 2>&1" ]
 EOF
 
 qm set "$VM_ID" --cicustom "user=${SNIPPET_STORAGE_ID}:snippets/$(basename "$USERDATA")"
@@ -1473,6 +1621,19 @@ rm -f "$IMG_FILE" || true
 
 SSH_TARGET="${VM_USER}@${VM_IP:-<vm-ip>}"
 
+# Which runtime the gateway should be onboarded onto. The guest records what
+# it actually chose (gateway=node|bun) in the status file; trust that when it
+# exists, because under --runtime auto only the guest can know whether a
+# usable Bun was already on the image. Pattern-match only, never eval: the
+# status text comes from inside the VM. Without a confirmed status, fall back
+# to what was requested -- auto then prints the Node form, which still works
+# (the gateway simply runs on Node).
+case "$INSTALL_STATUS" in
+  *gateway=bun*)  GATEWAY_RUNTIME="bun" ;;
+  *gateway=node*) GATEWAY_RUNTIME="node" ;;
+  *) if [[ "$RUNTIME_POLICY" == "bun" ]]; then GATEWAY_RUNTIME="bun"; else GATEWAY_RUNTIME="node"; fi ;;
+esac
+
 echo
 echo "=================================================="
 echo " OpenClaw VM Created"
@@ -1482,7 +1643,7 @@ echo " Name          : ${VM_NAME}"
 echo " Storage       : ${STORAGE}"
 echo " Snippets      : ${SNIPPET_STORAGE_ID}"
 echo " Bridge        : ${BRIDGE}"
-echo " Node.js       : ${NODE_MAJOR}.x (NodeSource)"
+echo " Runtime       : ${RUNTIME_POLICY} (requested; Node ${NODE_MAJOR}.x if none usable)"
 echo " OpenClaw      : ${OPENCLAW_VERSION} (requested)"
 echo " Log file      : ${LOG_FILE}"
 [[ -n "${VM_IP}" ]] && echo " VM IP         : ${VM_IP}"
@@ -1531,8 +1692,16 @@ echo
 echo "  2) Run onboarding with the pre-generated gateway token. The wizard"
 echo "     will ask how to authenticate — paste an API key, or sign in to"
 echo "     a subscription (ChatGPT, Copilot, Qwen, and others are supported):"
-echo "       openclaw onboard --install-daemon \\"
-echo "         --gateway-token \"\$(cat ~/.openclaw/gateway-token)\""
+if [[ "$GATEWAY_RUNTIME" == "bun" ]]; then
+  echo "       openclaw onboard --install-daemon --daemon-runtime bun \\"
+  echo "         --gateway-token \"\$(cat ~/.openclaw/gateway-token)\""
+  echo
+  echo "     --daemon-runtime bun hosts the gateway service on Bun. The openclaw"
+  echo "     command itself still runs on Node, which OpenClaw requires."
+else
+  echo "       openclaw onboard --install-daemon \\"
+  echo "         --gateway-token \"\$(cat ~/.openclaw/gateway-token)\""
+fi
 echo
 echo "     Passing the token is what links that file to the gateway config —"
 echo "     nothing reads it automatically. OpenClaw 2026.9.1+ applies the flag"

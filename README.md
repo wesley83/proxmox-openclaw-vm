@@ -2,7 +2,7 @@
 ### _Automatic OpenClaw-Ready Ubuntu VM Installer for Proxmox VE_
 Created by **Wesley Faulkner**
 
-**Current release: [v1.5.0](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.5.0)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Current release: [v1.6.0](https://github.com/wesley83/proxmox-openclaw-vm/releases/tag/v1.6.0)** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Jump to:** [Install](#-one-liner-install) · [Requirements](#-requirements) · [Options](#-options) · [After the script finishes](#-after-the-script-finishes) · [Accessing the Control UI](#4-access-the-control-ui) · [Troubleshooting](#-troubleshooting) · [Security](#-security--read-before-exposing-the-gateway)
 
@@ -16,7 +16,7 @@ Created by **Wesley Faulkner**
 
 `openclaw-vm.sh` is a one-command installer that creates a fully configured **Ubuntu VM** on **Proxmox VE** and automatically installs:
 
-- 🟢 **Node.js** (from NodeSource — version-verified against OpenClaw's minimums)
+- 🟢 **Node.js** (from NodeSource, or a usable one already on the image — validated by a capability probe, not a version number)
 - 🦞 **OpenClaw** ([openclaw/openclaw](https://github.com/openclaw/openclaw)) — the personal AI assistant, at `latest` or a version you pin
 - 🔐 SSH access for a customizable user (default: `openclaw`)
 - ⏱️ **systemd lingering**, so the gateway daemon survives logout and starts at boot
@@ -39,6 +39,8 @@ Created by **Wesley Faulkner**
 **A live compatibility check five days later (v1.4.5) found OpenClaw had tightened its Node requirement inside a patch release** — 2026.9.2 → 2026.9.3 dropped Node 22 and 25 support entirely and raised the Node 24/26 floors, with no announcement. `npm install` does not enforce this (`engine-strict` is off by default), so the install itself doesn't fail — only OpenClaw's own runtime guard does, when you try to run it. This script's default was Node 26 at the time; as of v1.5.0 it is Node 24, matching OpenClaw's own installer, which provisions the LTS line on Linux specifically so a fresh install never receives a prerelease runtime. `--node 22` and `--node 25` do not clear it for `--openclaw-version latest`. The script no longer trusts a successful `npm install` — see the [Fixed](CHANGELOG.md#145---2026-09-10) entry for what changed.
 
 **Three days after that (v1.4.6), the same drift check found the v1.4.5 fix itself needed a fix.** OpenClaw 2026.9.4 added a "diagnostic exemption" that lets `openclaw --version` print a real version and exit 0 on a Node it does not actually support — verified live on an isolated Node 22 with no other Node reachable to recover to: `--version` succeeded while `openclaw onboard` genuinely failed with a real Node/OpenClaw incompatibility (`node:sqlite truncates TEXT at embedded NUL`). The v1.4.5 check alone would have missed this. The script now also checks for OpenClaw's own "unsupported Node" warning, which is still written to stderr even on that exit-0 path. Testing this also caught a real regression in the v1.4.5-era code before it shipped further: a bare version check with no output at all (a fully broken install) hit a `pipefail` edge case that aborted the provisioning script silently, with no `.fail` file and no message — fixed in the same pass.
+
+**v1.6.0 adds runtime detection and an opt-in Bun-hosted gateway, and has not been run on Proxmox hardware.** It was verified instead by extracting the shipped guest code and running it across a 13-scenario matrix in a Node-free sandbox (only `apt-get` and `curl` stubbed), and by installing a gateway under Bun on a live systemd user session, where it ran and answered its RPC probe. That testing also turned up two dormant bugs present since v1.0 — see the [changelog](CHANGELOG.md#160---2026-09-16).
 
 ---
 
@@ -87,7 +89,7 @@ The script will:
 | Staging space | ~2 G free in `/tmp` on the node — the cloud image is downloaded there before import. Set `TMPDIR=/path` to stage it elsewhere if `/` is a small LV |
 | Host RAM | Enough free memory for `--memory` (default `8192` MB). Overcommit is allowed and only warned about, but a VM the node cannot fit will fail to start |
 | `python3` | Optional but recommended — used for JSON parsing, with fallbacks throughout |
-| Network access | `cloud-images.ubuntu.com` and `api.launchpad.net` (host); `archive.ubuntu.com`/`security.ubuntu.com` or your apt mirror, `deb.nodesource.com`, and the npm registry (guest). On an egress-filtered network, blocking the apt mirrors fails provisioning *and* blanks QGA status polling, since `qemu-guest-agent` is one of the apt packages |
+| Network access | `cloud-images.ubuntu.com` and `api.launchpad.net` (host); `archive.ubuntu.com`/`security.ubuntu.com` or your apt mirror, `deb.nodesource.com`, and the npm registry (guest) — plus `bun.sh` and `github.com` (release downloads) with `--runtime bun`. On an egress-filtered network, blocking the apt mirrors fails provisioning *and* blanks QGA status polling, since `qemu-guest-agent` is one of the apt packages |
 
 ### How storage is chosen
 
@@ -102,6 +104,29 @@ Auto-selection prefers `local-lvm`, falling back to the first active storage wit
 The prompt works with the documented one-liner because `bash -c "$(curl ...)"` passes the script as an *argument*, leaving stdin free. (The more common `curl | bash` makes the script itself stdin, which is why prompting is impossible there.)
 
 Nothing is destroyed either way — this only affects where a *new* disk is created.
+
+### How the JavaScript runtime is chosen
+
+OpenClaw is a Node.js application, and **Node is required in every mode** — including `--runtime bun`. That was verified against OpenClaw 2026.9.4 on a machine with no Node at all, not assumed:
+
+- `bun add -g --trust openclaw` fails inside OpenClaw's own preinstall, which looks for a real `node` on `PATH` and refuses without one.
+- Without `--trust` the install succeeds, but OpenClaw records its lifecycle steps as pending and replays that same check the first time it runs. So `bun openclaw.mjs` and `bun run --bun openclaw` — the two forms OpenClaw's docs give for Bun — fail too.
+
+Bun can *host the gateway*; it cannot *replace* Node. `--runtime` chooses what the gateway runs on:
+
+| `--runtime` | Node | Gateway runs on |
+|---|---|---|
+| `auto` (default) | Reuses a usable Node already on the image; otherwise installs Node from NodeSource | Bun if a usable Bun was **already** present, otherwise Node |
+| `node` | Same as `auto` | Always Node |
+| `bun` | Same as `auto` | Bun — installed if not already present |
+
+"Usable" means passing the same capability probe used throughout: `node:sqlite` present, a WAL-reset-safe SQLite build, and embedded NUL bytes surviving a round trip through TEXT, BLOB and JSON columns. A runtime that fails it is never used, whatever its version number says.
+
+On a fresh Ubuntu cloud image, `auto` always installs Node and runs the gateway on it — the `resolute` and `noble` images ship no JavaScript runtime at all (checked against their package manifests). Detection only changes anything on a customized image. An explicit `--node <major>` is never swapped for a different Node already on the image.
+
+**Why Node stays the default.** OpenClaw's own docs describe Node as its primary, recommended runtime, and warn that Bun 1.4.2 can keep SQLite handles and WAL files open after close — advising Node "when prompt file release matters." For an always-on assistant that stores conversations, that is a reasonable default.
+
+When the gateway will run on Bun, the summary prints the onboarding command with `--daemon-runtime bun` added. The `openclaw` command itself still runs on Node.
 
 ### Enable Snippets (Required Once)
 
@@ -123,6 +148,7 @@ This is the most common reason a first run fails immediately.
 | `-u`, `--ubuntu <codename>` | Ubuntu codename (`resolute`, `noble`, `jammy`, …) | latest active LTS (auto-detected; falls back to `noble`) |
 | `-n`, `--node <major>` | Node.js major version. Defaults to the **LTS** line, matching OpenClaw's own installer — NodeSource ships the newest patch of whatever major you ask for, and Node 26 is the Current line (LTS in Oct 2026), so defaulting to 26 can hand a fresh VM a prerelease runtime | `24` (supported: `22 24 25 26`) |
 | `--openclaw-version <v>` | OpenClaw npm version or dist-tag. Pin it (e.g. `2026.9.1`) for reproducible builds — OpenClaw ships often and `latest` means two VMs built months apart get different software. Not validated against the registry, so a typo only surfaces once the VM is up | `latest` |
+| `--runtime <auto\|node\|bun>` | Which JavaScript runtime hosts the gateway. **Node is installed or reused in every mode — OpenClaw cannot run without it** ([why](#how-the-javascript-runtime-is-chosen)). `auto` reuses a usable Node already on the image, and runs the gateway on Bun only if a usable Bun was already there. `bun` installs Bun and runs the gateway on it. `node` never uses Bun | `auto` |
 | `--user <name>` | VM username (lowercase, starts with a–z or `_`, ≤ 32 chars) | `openclaw` |
 | `--storage <id>` | Proxmox storage for the VM disk. An explicit value is always honored as-is; auto-selection skips a storage without room (see below) | `local-lvm` if present, else first active storage with `images` content |
 | `--snippet-storage <id>` | Proxmox storage for the cloud-init snippet | first storage with `snippets` content |
@@ -156,7 +182,8 @@ bash openclaw-vm.sh --openclaw-version 2026.9.1
 | CPU / Machine | `host` / `q35` |
 | Autostart | `--onboot 1` — this is an always-on assistant |
 | Guest Agent | Installed and started (used for status polling and IP detection) |
-| Node.js | NodeSource, Node 24 (LTS) by default; validated by a runtime capability probe, not a version number |
+| Node.js | Node 24 (LTS) from NodeSource, or a usable Node already on the image; validated by a runtime capability probe, not a version number |
+| Gateway runtime | Node by default. Bun with `--runtime bun`, or under `auto` when a usable Bun is already present; Bun is installed to `/opt/bun` and linked as `/usr/local/bin/bun` |
 | Build toolchain | `build-essential python3 cmake` — matches what OpenClaw's own `install.sh` installs on Debian/Ubuntu |
 | OpenClaw | `npm install -g openclaw@latest` — pin a version with `--openclaw-version` |
 | Gateway port | `18789` (not yet listening — set during onboarding) |
@@ -227,6 +254,8 @@ You'll want this before step 4 regardless: the Control UI tunnel runs on the mac
 ```bash
 openclaw onboard --install-daemon --gateway-token "$(cat ~/.openclaw/gateway-token)"
 ```
+
+If the script's summary shows `gateway=bun`, it prints this command with `--daemon-runtime bun` added — use it exactly as the summary gives it. See [How the JavaScript runtime is chosen](#how-the-javascript-runtime-is-chosen).
 
 This one command runs an interactive wizard with several prompts. Expect, roughly in this order:
 
@@ -611,6 +640,11 @@ The full provisioning path — `qm`/QGA plumbing, thin-LVM import/resize, cloud-
 
 Two things remain unexercised on hardware. **The interactive storage picker** added in v1.4.0 has not fired on a real node — the run that would have triggered it had enough free space, so the prompt path is verified only by unit-style testing of its input handling. And **onboarding** (`openclaw onboard`) has not been repeated since July, against a much older OpenClaw.
 
+**Nor have v1.6.0's runtime detection and Bun-hosted gateway.** They were tested by running the shipped guest code across 13 scenarios in a Node-free sandbox, and by running a Bun-hosted gateway on a live systemd user session — but never inside a real provisioned VM.
+
+### 🔍 Runtime detection only looks in the usual places
+An existing Node is found through `PATH`; an existing Bun through `PATH` or the VM user's `~/.bun/bin`. A Node installed per-user with nvm, fnm or Volta is not on root's `PATH` during provisioning, so it is not detected, and NodeSource installs one alongside it. That only matters on a customized image — fresh cloud images ship no runtime to find.
+
 ### 🖥️ amd64 only
 The cloud image URL is hard-coded to `amd64`. Edit `-server-cloudimg-amd64.img` → `-arm64.img` for ARM hosts.
 
@@ -684,7 +718,9 @@ A few things in this script look odd and are load-bearing. Before "simplifying" 
 - **`--openclaw-version` is validated by an anchored regex, and that regex is the security boundary** — not the quoting around it. The value is interpolated into runcmd YAML and then into a single-quoted argument inside a `bash -c` string; requiring a leading alphanumeric is what rejects `-`/`--` (npm flag injection) and `@`/`/` (package-spec substitution like `github:owner/repo`) before it ever gets there.
 - **The imported disk volid is read back from `qm config`**, not reconstructed. Directory/NFS storages produce `storage:VMID/vm-VMID-disk-0.raw`, and the disk index is the lowest *free* one — a guess can silently attach a stale orphan.
 - **The apt lock timeout is written to `apt.conf.d`**, not passed with `-o`, because the NodeSource setup script runs its own apt commands internally.
-- **The Node version is re-verified after install** rather than trusting apt. Ubuntu's own `nodejs` is 18, which silently breaks OpenClaw.
+- **Runtimes are validated by what they can do, not by version number.** A capability probe lifted from OpenClaw's own installer runs against every candidate: an existing Node, the Node that gets installed, an existing Bun, the Bun that gets installed. OpenClaw moved its Node floor twice inside patch releases in eight days, so a hardcoded version gate goes stale; the probe doesn't. It runs before the ~520 MB OpenClaw install, so a bad runtime fails in seconds.
+- **Bun hosts the gateway; it never replaces Node.** OpenClaw deliberately requires a real `node` binary even when running under Bun. Don't "optimize" `--runtime bun` into skipping the Node install — it fails the first time OpenClaw starts.
+- **Bun installs to `/opt/bun`, linked as `/usr/local/bin/bun` — not straight into `/usr/local`.** Bun's installer runs `unzip -o` and `rm -r` inside its target `bin` directory, which would be the shared `/usr/local/bin`. And `/usr/local/bin/bun` is one of the fixed paths OpenClaw checks when installing a Bun-hosted gateway. That matters because under cloud-init the installer adds Bun to nobody's `PATH` — it only prints advice to.
 - **`loginctl enable-linger`** is what stops the gateway from dying with your SSH session.
 - **The provisioning script has an EXIT trap** that writes the `.fail` status file, because `fail()` alone can't cover a command that dies unguarded under `set -e`.
 - **The cleanup trap is never disarmed** — it flushes the logging `tee` on success too, and gates destruction on both exit code and `KEEP_VM`.
